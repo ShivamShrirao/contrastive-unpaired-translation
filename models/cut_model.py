@@ -99,14 +99,19 @@ class CUTModel(BaseModel):
         Please also see PatchSampleF.create_mlp(), which is called at the first forward() call.
         """
         self.set_input(data)
-        bs_per_gpu = self.real_A.size(0) // max(len(self.opt.gpu_ids), 1)
-        self.real_A = self.real_A[:bs_per_gpu]
-        self.real_B = self.real_B[:bs_per_gpu]
+        # bs_per_gpu = self.real_A.size(0) // max(len(self.opt.gpu_ids), 1)
+        # self.real_A = self.real_A[:bs_per_gpu]
+        # self.real_B = self.real_B[:bs_per_gpu]
         self.forward()                     # compute fake images: G(A)
         if self.opt.isTrain:
             self.compute_D_loss().backward()                  # calculate gradients for D
-            self.compute_G_loss().backward()                   # calculate graidents for G
+            self.compute_G_loss().backward()                  # calculate gradients for G
             if self.opt.lambda_NCE > 0.0:
+                for m,_ in self.netF.named_children():
+                    mlp = getattr(self.netF, m)
+                    if isinstance(mlp, torch.nn.DataParallel):
+                        setattr(self.netF, m, mlp.module)
+                self.netF = torch.nn.DataParallel(self.netF, self.gpu_ids)
                 self.optimizer_F = torch.optim.Adam(self.netF.parameters(), lr=self.opt.lr, betas=(self.opt.beta1, self.opt.beta2))
                 self.optimizers.append(self.optimizer_F)
 
@@ -203,6 +208,7 @@ class CUTModel(BaseModel):
             feat_q = [torch.flip(fq, [3]) for fq in feat_q]
 
         feat_k = self.netG(src, self.nce_layers, encode_only=True)
+        # print([(k.shape, k.device) for k in feat_k])
         feat_k_pool, sample_ids = self.netF(feat_k, self.opt.num_patches, None)
         feat_q_pool, _ = self.netF(feat_q, self.opt.num_patches, sample_ids)
 

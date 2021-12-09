@@ -207,9 +207,8 @@ def init_net(net, init_type='normal', init_gain=0.02, gpu_ids=[], debug=False, i
     """
     if len(gpu_ids) > 0:
         assert(torch.cuda.is_available())
+        net = nn.DataParallel(net, gpu_ids)
         net.to(gpu_ids[0])
-        # if not amp:
-        # net = torch.nn.DataParallel(net, gpu_ids)  # multi-GPUs for non-AMP training
     if initialize_weights:
         init_weights(net, init_type, init_gain=init_gain, debug=debug)
     return net
@@ -281,7 +280,7 @@ def define_F(input_nc, netF, norm='batch', use_dropout=False, init_type='normal'
         net = StridedConvF(init_type=init_type, init_gain=init_gain, gpu_ids=gpu_ids)
     else:
         raise NotImplementedError('projection model name [%s] is not recognized' % netF)
-    return init_net(net, init_type, init_gain, gpu_ids)
+    return net #init_net(net, init_type, init_gain, gpu_ids)
 
 
 def define_D(input_nc, ndf, netD, n_layers_D=3, norm='batch', init_type='normal', init_gain=0.02, no_antialias=False, gpu_ids=[], opt=None):
@@ -504,7 +503,7 @@ class StridedConvF(nn.Module):
             C = max(C // 2, 64)
         mlp.append(nn.Conv2d(C, 64, 3))
         mlp = nn.Sequential(*mlp)
-        init_net(mlp, self.init_type, self.init_gain, self.gpu_ids)
+        mlp = init_net(mlp, self.init_type, self.init_gain, self.gpu_ids)
         return mlp
 
     def update_moving_average(self, key, x):
@@ -544,10 +543,8 @@ class PatchSampleF(nn.Module):
         for mlp_id, feat in enumerate(feats):
             input_nc = feat.shape[1]
             mlp = nn.Sequential(*[nn.Linear(input_nc, self.nc), nn.ReLU(), nn.Linear(self.nc, self.nc)])
-            if len(self.gpu_ids) > 0:
-                mlp.cuda()
+            mlp = init_net(mlp, self.init_type, self.init_gain, self.gpu_ids)
             setattr(self, 'mlp_%d' % mlp_id, mlp)
-        init_net(self, self.init_type, self.init_gain, self.gpu_ids)
         self.mlp_init = True
 
     def forward(self, feats, num_patches=64, patch_ids=None):
@@ -573,6 +570,7 @@ class PatchSampleF(nn.Module):
             if self.use_mlp:
                 mlp = getattr(self, 'mlp_%d' % feat_id)
                 x_sample = mlp(x_sample)
+            if isinstance(patch_id, np.ndarray): patch_id=torch.tensor(patch_id, device=feats[0].device)
             return_ids.append(patch_id)
             x_sample = self.l2norm(x_sample)
 
