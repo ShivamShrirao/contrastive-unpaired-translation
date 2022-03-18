@@ -6,6 +6,7 @@ import functools
 from torch.optim import lr_scheduler
 import numpy as np
 from .stylegan_networks import StyleGAN2Discriminator, StyleGAN2Generator, TileStyleGAN2Discriminator
+from .ffc import FFCResNetGenerator
 
 ###############################################################################
 # Helper Functions
@@ -263,6 +264,8 @@ def define_G(input_nc, output_nc, ngf, netG, norm='batch', use_dropout=False, in
     elif netG == 'resnet_cat':
         n_blocks = 8
         net = G_Resnet(input_nc, output_nc, opt.nz, num_downs=2, n_res=n_blocks - 4, ngf=ngf, norm='inst', nl_layer='relu')
+    elif netG == 'ffc':
+        net = FFCResNetGenerator(input_nc, output_nc, ngf, n_blocks=9)
     else:
         raise NotImplementedError('Generator model name [%s] is not recognized' % netG)
     return init_net(net, init_type, init_gain, gpu_ids, initialize_weights=('stylegan2' not in netG))
