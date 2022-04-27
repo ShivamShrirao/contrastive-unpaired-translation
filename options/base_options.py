@@ -69,6 +69,37 @@ class BaseOptions():
                             default=1, type=int,
                             help='Number of downsampling layers used by StyleGAN2Generator')
 
+        parser.add_argument('--CUT_mode', type=str, default="CUT", choices='(CUT, cut, FastCUT, fastcut)')
+
+        parser.add_argument('--lambda_GAN', type=float, default=1.0, help='weight for GAN loss：GAN(G(X))')
+        parser.add_argument('--lambda_NCE', type=float, default=1.0, help='weight for NCE loss: NCE(G(X), X)')
+        parser.add_argument('--nce_idt', type=util.str2bool, nargs='?', const=True, default=False, help='use NCE loss for identity mapping: NCE(G(Y), Y))')
+        parser.add_argument('--nce_layers', type=str, default='0,4,8,12,16', help='compute NCE loss on which layers')
+        parser.add_argument('--nce_includes_all_negatives_from_minibatch',
+                            type=util.str2bool, nargs='?', const=True, default=False,
+                            help='(used for single image translation) If True, include the negatives from the other samples of the minibatch when computing the contrastive loss. Please see models/patchnce.py for more details.')
+        parser.add_argument('--netF', type=str, default='mlp_sample', choices=['sample', 'reshape', 'mlp_sample'], help='how to downsample the feature map')
+        parser.add_argument('--netF_nc', type=int, default=256)
+        parser.add_argument('--nce_T', type=float, default=0.07, help='temperature for NCE loss')
+        parser.add_argument('--num_patches', type=int, default=256, help='number of patches per layer')
+        parser.add_argument('--flip_equivariance',
+                            type=util.str2bool, nargs='?', const=True, default=False,
+                            help="Enforce flip-equivariance as additional regularization. It's used by FastCUT, but not CUT")
+
+        parser.set_defaults(pool_size=0)
+
+        opt, _ = parser.parse_known_args()
+
+        if opt.CUT_mode.lower() == "cut":
+            parser.set_defaults(nce_idt=True, lambda_NCE=1.0)
+        elif opt.CUT_mode.lower() == "fastcut":
+            parser.set_defaults(
+                nce_idt=False, lambda_NCE=10.0, flip_equivariance=True,
+                n_epochs=150, n_epochs_decay=50
+            )
+        else:
+            raise ValueError(opt.CUT_mode)
+
         self.initialized = True
         return parser
 

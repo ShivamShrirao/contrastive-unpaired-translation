@@ -205,8 +205,6 @@ class CUTModel(BaseModel):
         n_layers = len(self.nce_layers)
         feat_q = self.netG(tgt, self.nce_layers, encode_only=True)
 
-        if self.opt.flip_equivariance and self.flipped_for_equivariance:
-            feat_q = [torch.flip(fq, [3]) for fq in feat_q]
         feat_k = self.netG(src, self.nce_layers, encode_only=True)
         # print([(k.shape, k.device) for k in feat_k])
         feat_k_pool, sample_ids = self.netF(feat_k, self.opt.num_patches, None)
