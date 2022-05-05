@@ -7,7 +7,6 @@ from torch.nn.utils.parametrizations import spectral_norm
 from torchvision.models import vgg16_bn
 from torchvision.models.feature_extraction import create_feature_extractor
 
-
 def icnr_init(x, scale=2, init=nn.init.kaiming_normal_):
     ni, nf, h, w = x.shape
     ni2 = int(ni / (scale**2))
@@ -208,7 +207,6 @@ class PatchSampleF(nn.Module):
         # potential issues: currently, we use the same patch_ids for multiple images in the batch
         super(PatchSampleF, self).__init__()
         self.l2norm = Normalize(2)
-        self.use_mlp = use_mlp
         self.nc = nc  # hard-coded
         self.mlp_init = False
         self.init_type = init_type
@@ -222,7 +220,7 @@ class PatchSampleF(nn.Module):
             setattr(self, 'mlp_%d' % mlp_id, mlp)
         self.mlp_init = True
 
-    def forward(self, feats, num_patches=64, patch_ids=None):
+    def forward(self, feats, num_patches=256, patch_ids=None):
         return_ids = []
         return_feats = []
         if self.use_mlp and not self.mlp_init:
@@ -382,7 +380,6 @@ class VGGLoss(nn.Module):
 
 
 class Normalize(nn.Module):
-
     def __init__(self, power=2):
         super(Normalize, self).__init__()
         self.power = power
@@ -391,3 +388,54 @@ class Normalize(nn.Module):
         norm = x.pow(self.power).sum(1, keepdim=True).pow(1. / self.power)
         out = x.div(norm + 1e-7)
         return out
+
+
+class PatchNCELoss(nn.Module):
+    def __init__(self, opt):
+        super().__init__()
+        self.opt = opt
+        self.cross_entropy_loss = torch.nn.CrossEntropyLoss(reduction='none')
+        self.mask_dtype = torch.bool
+
+    def forward(self, feat_q, feat_k):
+        num_patches = feat_q.shape[0]
+        dim = feat_q.shape[1]
+        feat_k = feat_k.detach()
+
+        # pos logit
+        l_pos = torch.bmm(
+            feat_q.view(num_patches, 1, -1), feat_k.view(num_patches, -1, 1))
+        l_pos = l_pos.view(num_patches, 1)
+
+        # neg logit
+
+        # Should the negatives from the other samples of a minibatch be utilized?
+        # In CUT and FastCUT, we found that it's best to only include negatives
+        # from the same image. Therefore, we set
+        # --nce_includes_all_negatives_from_minibatch as False
+        # However, for single-image translation, the minibatch consists of
+        # crops from the "same" high-resolution image.
+        # Therefore, we will include the negatives from the entire minibatch.
+        if self.opt.nce_includes_all_negatives_from_minibatch:
+            # reshape features as if they are all negatives of minibatch of size 1.
+            batch_dim_for_bmm = 1
+        else:
+            batch_dim_for_bmm = self.opt.batch_size
+
+        # reshape features to batch size
+        feat_q = feat_q.view(batch_dim_for_bmm, -1, dim)
+        feat_k = feat_k.view(batch_dim_for_bmm, -1, dim)
+        npatches = feat_q.size(1)
+        l_neg_curbatch = torch.bmm(feat_q, feat_k.transpose(2, 1))
+
+        # diagonal entries are similarity between same features, and hence meaningless.
+        # just fill the diagonal with very small number, which is exp(-10) and almost zero
+        diagonal = torch.eye(npatches, device=feat_q.device, dtype=self.mask_dtype)[None, :, :]
+        l_neg_curbatch.masked_fill_(diagonal, -10.0)
+        l_neg = l_neg_curbatch.view(-1, npatches)
+
+        out = torch.cat((l_pos, l_neg), dim=1) / self.opt.nce_T
+
+        loss = self.cross_entropy_loss(out, torch.zeros(out.size(0), dtype=torch.long, device=feat_q.device))
+
+        return loss

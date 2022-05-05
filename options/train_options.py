@@ -30,6 +30,7 @@ class TrainOptions(BaseOptions):
         parser.add_argument('--pretrained_name', type=str, default=None, help='resume training from another checkpoint')
 
         # training parameters
+        parser.add_argument('--sync_bn', action='store_true', help="Synchronize BatchNorm across all devices. Use when batchsize is small.")
         parser.add_argument('--n_epochs', type=int, default=200, help='number of epochs with the initial learning rate')
         parser.add_argument('--n_epochs_decay', type=int, default=200, help='number of epochs to linearly decay learning rate to zero')
         parser.add_argument('--beta1', type=float, default=0.5, help='momentum term of adam')
@@ -39,6 +40,13 @@ class TrainOptions(BaseOptions):
         parser.add_argument('--pool_size', type=int, default=50, help='the size of image buffer that stores previously generated images')
         parser.add_argument('--lr_policy', type=str, default='linear', help='learning rate policy. [linear | step | plateau | cosine]')
         parser.add_argument('--lr_decay_iters', type=int, default=50, help='multiply by a gamma every lr_decay_iters iterations')
+        
+        parser.add_argument('--use_wandb', action='store_true', help="Use wandb logger.")
+        parser.add_argument('--project', type=str, default='nerf_refine', help="Name of wandb project.")
+        parser.add_argument('--resume', type=str, default=None, help="ID of wandb run to resume.")
+        parser.add_argument('--init_epoch', type=int, default=1, metavar="N", help="Initial epoch.")
+        parser.add_argument('--log_interval', type=int, default=20, metavar="N", help="Log per N steps.")
+        parser.add_argument('--img_log_interval', type=int, default=300, metavar="N", help="Log images per N steps.")
 
         self.isTrain = True
         return parser

@@ -1,8 +1,11 @@
 import os
 import random
+from threading import Thread
+
 import numpy as np
 import torch
 import torch.distributed as dist
+import wandb
 
 
 class AverageMeter:
@@ -32,6 +35,22 @@ def seed_everything(seed=3407):
 def set_grads(grads, params):
     for g, p in zip(grads, params):
         p.grad = g
+
+
+def Threaded(fn):                                   # annotation wrapper to launch a function as a thread
+    def wrapper(*args, **kwargs):
+        t = Thread(target=fn, args=args, kwargs=kwargs)
+        t.start()
+        return t
+    return wrapper
+
+
+@Threaded
+def log_imgs_wandb(**kwargs):
+    im_dict = {}
+    for im, arr in kwargs:
+        im_dict[im] = [wandb.Image(im) for im in tensors2im(arr)]
+    wandb.log(im_dict)  
 
 
 def tensors2im(x):
