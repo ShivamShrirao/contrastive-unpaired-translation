@@ -1,6 +1,7 @@
 *.xml
 *.json
 .ipynb_checkpoints/
+wandb/
 node_modules/
 .DS_Store
 debug*

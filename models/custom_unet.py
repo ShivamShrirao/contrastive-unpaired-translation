@@ -1,11 +1,12 @@
 import numpy as np
-
+import functools
 import torch
 import torch.nn as nn
 from torch.nn import functional as F
 from torch.nn.utils.parametrizations import spectral_norm
 from torchvision.models import vgg16_bn
 from torchvision.models.feature_extraction import create_feature_extractor
+
 
 def icnr_init(x, scale=2, init=nn.init.kaiming_normal_):
     ni, nf, h, w = x.shape
@@ -189,7 +190,7 @@ class Unet(nn.Module):
         u = self.up0(u0, d)        # 64, 384
         o = self.up(u, x)        # 32, 768
         if get_feat:
-            feats = d, d0, d1, d2, d3
+            feats = x, d0, d1, d2, d3
             if encode_only:
                 return feats
             else:
@@ -212,6 +213,7 @@ class PatchSampleF(nn.Module):
         self.init_type = init_type
         self.init_gain = init_gain
         self.gpu_ids = gpu_ids
+        self.use_mlp = use_mlp
 
     def create_mlp(self, feats):
         for mlp_id, feat in enumerate(feats):
@@ -233,10 +235,10 @@ class PatchSampleF(nn.Module):
                     patch_id = patch_ids[feat_id]
                 else:
                     # torch.randperm produces cudaErrorIllegalAddress for newer versions of PyTorch. https://github.com/taesungp/contrastive-unpaired-translation/issues/83
-                    #patch_id = torch.randperm(feat_reshape.shape[1], device=feats[0].device)
-                    patch_id = np.random.permutation(feat_reshape.shape[1])
+                    patch_id = torch.randperm(feat_reshape.shape[1], dtype=torch.long, device=feat.device)
+                    # patch_id = np.random.permutation(feat_reshape.shape[1])
                     patch_id = patch_id[:int(min(num_patches, patch_id.shape[0]))]  # .to(patch_ids.device)
-                patch_id = torch.tensor(patch_id, dtype=torch.long, device=feat.device)
+                # patch_id = torch.tensor(patch_id, dtype=torch.long, device=feat.device)
                 x_sample = feat_reshape[:, patch_id, :].flatten(0, 1)  # reshape(-1, x.shape[1])
             else:
                 x_sample = feat_reshape
@@ -255,63 +257,169 @@ class PatchSampleF(nn.Module):
         return return_feats, return_ids
 
 
-class NLayerDiscriminator(nn.Module):
-    def __init__(self, input_nc, ndf=64, n_layers=3, norm_lyr=nn.BatchNorm2d, use_sigmoid=False, getIntermFeat=False, gauss_std=0.1):
+class PatchNCELoss(nn.Module):
+    def __init__(self, opt):
         super().__init__()
-        self.getIntermFeat = getIntermFeat
-        self.n_layers = n_layers
+        self.opt = opt
+        self.cross_entropy_loss = torch.nn.CrossEntropyLoss()
+        self.mask_dtype = torch.bool
+
+    def forward(self, feat_q, feat_k):
+        num_patches = feat_q.shape[0]
+        dim = feat_q.shape[1]
+        feat_k = feat_k.detach()
+
+        # pos logit
+        l_pos = torch.bmm(
+            feat_q.view(num_patches, 1, -1), feat_k.view(num_patches, -1, 1))
+        l_pos = l_pos.view(num_patches, 1)
+
+        # neg logit
+
+        # Should the negatives from the other samples of a minibatch be utilized?
+        # In CUT and FastCUT, we found that it's best to only include negatives
+        # from the same image. Therefore, we set
+        # --nce_includes_all_negatives_from_minibatch as False
+        # However, for single-image translation, the minibatch consists of
+        # crops from the "same" high-resolution image.
+        # Therefore, we will include the negatives from the entire minibatch.
+        if self.opt.nce_includes_all_negatives_from_minibatch:
+            # reshape features as if they are all negatives of minibatch of size 1.
+            batch_dim_for_bmm = 1
+        else:
+            batch_dim_for_bmm = self.opt.batch_size
+
+        # reshape features to batch size
+        feat_q = feat_q.view(batch_dim_for_bmm, -1, dim)
+        feat_k = feat_k.view(batch_dim_for_bmm, -1, dim)
+        npatches = feat_q.size(1)
+        l_neg_curbatch = torch.bmm(feat_q, feat_k.transpose(2, 1))
+
+        # diagonal entries are similarity between same features, and hence meaningless.
+        # just fill the diagonal with very small number, which is exp(-10) and almost zero
+        diagonal = torch.eye(npatches, device=feat_q.device, dtype=self.mask_dtype)[None, :, :]
+        l_neg_curbatch.masked_fill_(diagonal, -10.0)
+        l_neg = l_neg_curbatch.view(-1, npatches)
+
+        out = torch.cat((l_pos, l_neg), dim=1) / self.opt.nce_T
+        loss = self.cross_entropy_loss(out, torch.zeros(out.size(0), dtype=torch.long, device=feat_q.device))
+        return loss
+
+
+class NLayerDiscriminator(nn.Module):
+    """Defines a PatchGAN discriminator"""
+
+    def __init__(self, input_nc, ndf=64, n_layers=3, norm_layer=nn.BatchNorm2d, no_antialias=False):
+        """Construct a PatchGAN discriminator
+
+        Parameters:
+            input_nc (int)  -- the number of channels in input images
+            ndf (int)       -- the number of filters in the last conv layer
+            n_layers (int)  -- the number of conv layers in the discriminator
+            norm_layer      -- normalization layer
+        """
+        super(NLayerDiscriminator, self).__init__()
+        if type(norm_layer) == functools.partial:  # no need to use bias as BatchNorm2d has affine parameters
+            use_bias = norm_layer.func == nn.InstanceNorm2d
+        else:
+            use_bias = norm_layer == nn.InstanceNorm2d
 
         kw = 4
-        padw = int(np.ceil((kw - 1.0) / 2))
-        sequence = [[
-            GaussianNoise(gauss_std),
-            nn.Conv2d(input_nc, ndf, kernel_size=kw, stride=2, padding=padw),
-            nn.LeakyReLU(0.2, True)
-        ]]
-
-        nf = ndf
-        for n in range(1, n_layers):
-            nf_prev = nf
-            nf = min(nf * 2, 512)
-            sequence += [[
-                GaussianNoise(gauss_std),
-                nn.Conv2d(nf_prev, nf, kernel_size=kw, stride=2, padding=padw),
-                norm_lyr(nf),
-                nn.LeakyReLU(0.2, True)
-            ]]
-
-        nf_prev = nf
-        nf = min(nf * 2, 512)
-        sequence += [[
-            GaussianNoise(gauss_std),
-            nn.Conv2d(nf_prev, nf, kernel_size=kw, stride=1, padding=padw),
-            norm_lyr(nf),
-            nn.LeakyReLU(0.2, True)
-        ]]
-
-        sequence += [[GaussianNoise(gauss_std), nn.Conv2d(nf, 1, kernel_size=kw, stride=1, padding=padw)]]
-
-        if use_sigmoid:
-            sequence += [[nn.Sigmoid()]]
-
-        if getIntermFeat:
-            for n in range(len(sequence)):
-                setattr(self, 'model' + str(n), nn.Sequential(*sequence[n]))
+        padw = 1
+        if(no_antialias):
+            sequence = [nn.Conv2d(input_nc, ndf, kernel_size=kw, stride=2, padding=padw), nn.LeakyReLU(0.2, True)]
         else:
-            sequence_stream = []
-            for n in range(len(sequence)):
-                sequence_stream += sequence[n]
-            self.model = nn.Sequential(*sequence_stream)
+            sequence = [nn.Conv2d(input_nc, ndf, kernel_size=kw, stride=1, padding=padw), nn.LeakyReLU(0.2, True), Downsample(ndf)]
+        nf_mult = 1
+        nf_mult_prev = 1
+        for n in range(1, n_layers):  # gradually increase the number of filters
+            nf_mult_prev = nf_mult
+            nf_mult = min(2 ** n, 8)
+            if(no_antialias):
+                sequence += [
+                    nn.Conv2d(ndf * nf_mult_prev, ndf * nf_mult, kernel_size=kw, stride=2, padding=padw, bias=use_bias),
+                    norm_layer(ndf * nf_mult),
+                    nn.LeakyReLU(0.2, True)
+                ]
+            else:
+                sequence += [
+                    nn.Conv2d(ndf * nf_mult_prev, ndf * nf_mult, kernel_size=kw, stride=1, padding=padw, bias=use_bias),
+                    norm_layer(ndf * nf_mult),
+                    nn.LeakyReLU(0.2, True),
+                    Downsample(ndf * nf_mult)]
+
+        nf_mult_prev = nf_mult
+        nf_mult = min(2 ** n_layers, 8)
+        sequence += [
+            nn.Conv2d(ndf * nf_mult_prev, ndf * nf_mult, kernel_size=kw, stride=1, padding=padw, bias=use_bias),
+            norm_layer(ndf * nf_mult),
+            nn.LeakyReLU(0.2, True)
+        ]
+
+        sequence += [nn.Conv2d(ndf * nf_mult, 1, kernel_size=kw, stride=1, padding=padw)]  # output 1 channel prediction map
+        self.model = nn.Sequential(*sequence)
+
+    def forward(self, input):
+        """Standard forward."""
+        return self.model(input)
+
+
+class Downsample(nn.Module):
+    def __init__(self, channels, pad_type='reflect', filt_size=3, stride=2, pad_off=0):
+        super(Downsample, self).__init__()
+        self.filt_size = filt_size
+        self.pad_off = pad_off
+        self.pad_sizes = [int(1. * (filt_size - 1) / 2), int(np.ceil(1. * (filt_size - 1) / 2)), int(1. * (filt_size - 1) / 2), int(np.ceil(1. * (filt_size - 1) / 2))]
+        self.pad_sizes = [pad_size + pad_off for pad_size in self.pad_sizes]
+        self.stride = stride
+        self.off = int((self.stride - 1) / 2.)
+        self.channels = channels
+
+        filt = get_filter(filt_size=self.filt_size)
+        self.register_buffer('filt', filt[None, None, :, :].repeat((self.channels, 1, 1, 1)))
+
+        self.pad = get_pad_layer(pad_type)(self.pad_sizes)
 
     def forward(self, inp):
-        if self.getIntermFeat:
-            res = [inp]
-            for n in range(self.n_layers + 2):
-                model = getattr(self, 'model' + str(n))
-                res.append(model(res[-1]))
-            return res[1:]
+        if(self.filt_size == 1):
+            if(self.pad_off == 0):
+                return inp[:, :, ::self.stride, ::self.stride]
+            else:
+                return self.pad(inp)[:, :, ::self.stride, ::self.stride]
         else:
-            return self.model(inp)
+            return F.conv2d(self.pad(inp), self.filt, stride=self.stride, groups=inp.shape[1])
+
+
+def get_filter(filt_size=3):
+    if(filt_size == 1):
+        a = np.array([1., ])
+    elif(filt_size == 2):
+        a = np.array([1., 1.])
+    elif(filt_size == 3):
+        a = np.array([1., 2., 1.])
+    elif(filt_size == 4):
+        a = np.array([1., 3., 3., 1.])
+    elif(filt_size == 5):
+        a = np.array([1., 4., 6., 4., 1.])
+    elif(filt_size == 6):
+        a = np.array([1., 5., 10., 10., 5., 1.])
+    elif(filt_size == 7):
+        a = np.array([1., 6., 15., 20., 15., 6., 1.])
+
+    filt = torch.Tensor(a[:, None] * a[None, :])
+    filt = filt / torch.sum(filt)
+    return filt
+
+def get_pad_layer(pad_type):
+    if(pad_type in ['refl', 'reflect']):
+        PadLayer = nn.ReflectionPad2d
+    elif(pad_type in ['repl', 'replicate']):
+        PadLayer = nn.ReplicationPad2d
+    elif(pad_type == 'zero'):
+        PadLayer = nn.ZeroPad2d
+    else:
+        print('Pad type [%s] not recognized' % pad_type)
+    return PadLayer
 
 
 class GaussianNoise(nn.Module):
@@ -339,16 +447,8 @@ class GANLoss(nn.Module):
             self.loss = nn.BCEWithLogitsLoss()
 
     def __call__(self, inp, target_is_real):
-        if isinstance(inp[0], list):
-            loss = 0
-            for input_i in inp:
-                pred = input_i[-1]
-                target_tensor = torch.empty_like(pred).fill_(target_is_real)
-                loss += self.loss(pred, target_tensor)
-            return loss
-        else:
-            target_tensor = torch.empty_like(inp[-1]).fill_(target_is_real)
-            return self.loss(inp[-1], target_tensor)
+        target_tensor = torch.empty_like(inp).fill_(target_is_real)
+        return self.loss(inp, target_tensor)
 
 
 def gram_matrix(x):
@@ -390,52 +490,56 @@ class Normalize(nn.Module):
         return out
 
 
-class PatchNCELoss(nn.Module):
-    def __init__(self, opt):
-        super().__init__()
-        self.opt = opt
-        self.cross_entropy_loss = torch.nn.CrossEntropyLoss(reduction='none')
-        self.mask_dtype = torch.bool
+def get_norm_layer(norm_type='instance'):
+    """Return a normalization layer
+    Parameters:
+        norm_type (str) -- the name of the normalization layer: batch | instance | none
 
-    def forward(self, feat_q, feat_k):
-        num_patches = feat_q.shape[0]
-        dim = feat_q.shape[1]
-        feat_k = feat_k.detach()
+    For BatchNorm, we use learnable affine parameters and track running statistics (mean/stddev).
+    For InstanceNorm, we do not use learnable affine parameters. We do not track running statistics.
+    """
+    if norm_type == 'batch':
+        norm_layer = functools.partial(nn.BatchNorm2d, affine=True, track_running_stats=True)
+    elif norm_type == 'instance':
+        norm_layer = functools.partial(nn.InstanceNorm2d, affine=False, track_running_stats=False)
+    elif norm_type == 'none':
+        def norm_layer(x):
+            return nn.Identity()
+    else:
+        raise NotImplementedError('normalization layer [%s] is not found' % norm_type)
+    return norm_layer
 
-        # pos logit
-        l_pos = torch.bmm(
-            feat_q.view(num_patches, 1, -1), feat_k.view(num_patches, -1, 1))
-        l_pos = l_pos.view(num_patches, 1)
 
-        # neg logit
+def init_weights(net, init_type='normal', init_gain=0.02, debug=False):
+    """Initialize network weights.
 
-        # Should the negatives from the other samples of a minibatch be utilized?
-        # In CUT and FastCUT, we found that it's best to only include negatives
-        # from the same image. Therefore, we set
-        # --nce_includes_all_negatives_from_minibatch as False
-        # However, for single-image translation, the minibatch consists of
-        # crops from the "same" high-resolution image.
-        # Therefore, we will include the negatives from the entire minibatch.
-        if self.opt.nce_includes_all_negatives_from_minibatch:
-            # reshape features as if they are all negatives of minibatch of size 1.
-            batch_dim_for_bmm = 1
-        else:
-            batch_dim_for_bmm = self.opt.batch_size
+    Parameters:
+        net (network)   -- network to be initialized
+        init_type (str) -- the name of an initialization method: normal | xavier | kaiming | orthogonal
+        init_gain (float)    -- scaling factor for normal, xavier and orthogonal.
 
-        # reshape features to batch size
-        feat_q = feat_q.view(batch_dim_for_bmm, -1, dim)
-        feat_k = feat_k.view(batch_dim_for_bmm, -1, dim)
-        npatches = feat_q.size(1)
-        l_neg_curbatch = torch.bmm(feat_q, feat_k.transpose(2, 1))
+    We use 'normal' in the original pix2pix and CycleGAN paper. But xavier and kaiming might
+    work better for some applications. Feel free to try yourself.
+    """
+    def init_func(m):  # define the initialization function
+        classname = m.__class__.__name__
+        if hasattr(m, 'weight') and (classname.find('Conv') != -1 or classname.find('Linear') != -1):
+            if debug:
+                print(classname)
+            if init_type == 'normal':
+                nn.init.normal_(m.weight.data, 0.0, init_gain)
+            elif init_type == 'xavier':
+                nn.init.xavier_normal_(m.weight.data, gain=init_gain)
+            elif init_type == 'kaiming':
+                nn.init.kaiming_normal_(m.weight.data, a=0, mode='fan_in')
+            elif init_type == 'orthogonal':
+                nn.init.orthogonal_(m.weight.data, gain=init_gain)
+            else:
+                raise NotImplementedError('initialization method [%s] is not implemented' % init_type)
+            if hasattr(m, 'bias') and m.bias is not None:
+                nn.init.constant_(m.bias.data, 0.0)
+        elif classname.find('BatchNorm2d') != -1:  # BatchNorm Layer's weight is not a matrix; only normal distribution applies.
+            nn.init.normal_(m.weight.data, 1.0, init_gain)
+            nn.init.constant_(m.bias.data, 0.0)
 
-        # diagonal entries are similarity between same features, and hence meaningless.
-        # just fill the diagonal with very small number, which is exp(-10) and almost zero
-        diagonal = torch.eye(npatches, device=feat_q.device, dtype=self.mask_dtype)[None, :, :]
-        l_neg_curbatch.masked_fill_(diagonal, -10.0)
-        l_neg = l_neg_curbatch.view(-1, npatches)
-
-        out = torch.cat((l_pos, l_neg), dim=1) / self.opt.nce_T
-
-        loss = self.cross_entropy_loss(out, torch.zeros(out.size(0), dtype=torch.long, device=feat_q.device))
-
-        return loss
+    net.apply(init_func)

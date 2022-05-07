@@ -1,3 +1,4 @@
+import argparse
 import os
 import random
 from threading import Thread
@@ -48,9 +49,9 @@ def Threaded(fn):                                   # annotation wrapper to laun
 @Threaded
 def log_imgs_wandb(**kwargs):
     im_dict = {}
-    for im, arr in kwargs:
+    for im, arr in kwargs.items():
         im_dict[im] = [wandb.Image(im) for im in tensors2im(arr)]
-    wandb.log(im_dict)  
+    wandb.log(im_dict)
 
 
 def tensors2im(x):
@@ -99,3 +100,35 @@ def synchronize():
 def cleanup(distributed=True):
     if distributed:
         dist.destroy_process_group()
+
+def str2bool(v):
+    if isinstance(v, bool):
+        return v
+    if v.lower() in ('yes', 'true', 't', 'y', '1'):
+        return True
+    elif v.lower() in ('no', 'false', 'f', 'n', '0'):
+        return False
+    else:
+        raise argparse.ArgumentTypeError('Boolean value expected.')
+
+def mkdirs(paths):
+    """create empty directories if they don't exist
+
+    Parameters:
+        paths (str list) -- a list of directory paths
+    """
+    if isinstance(paths, list) and not isinstance(paths, str):
+        for path in paths:
+            mkdir(path)
+    else:
+        mkdir(paths)
+
+
+def mkdir(path):
+    """create a single empty directory if it didn't exist
+
+    Parameters:
+        path (str) -- a single directory path
+    """
+    if not os.path.exists(path):
+        os.makedirs(path)

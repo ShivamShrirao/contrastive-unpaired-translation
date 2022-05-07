@@ -5,9 +5,10 @@ python3 -m torch.distributed.run \
         distributed_train.py \
         --sync_bn \
         --n_epochs 100 \
-        --batch_size 8 \
+        --batch_size 16 \
         --project new_cut \
         --use_wandb \
-        --dataroot ~/data/nerf_refine_data \
-        --checkpoints_dir checkpoints/new_cut/ \
+        --dataroot /data/seatgenfinaldestination5/ \
+        --checkpoints_dir checkpoints/ \
+        --name new_cut/ \
         "$@"

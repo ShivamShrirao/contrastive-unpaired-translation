@@ -1,10 +1,7 @@
 import os
-from turtle import forward
 import numpy as np
 from tqdm import tqdm
-import json
 
-from zmq import device
 import wandb
 
 import torch
@@ -15,24 +12,33 @@ from torch.cuda import amp
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch import autograd
+from torch.optim import lr_scheduler
+from torchinfo import summary
 
 from options.train_options import TrainOptions
-from utils import AverageMeter, tensors2im, reduce_loss, synchronize, cleanup, seed_everything, set_grads, log_imgs_wandb
+from utils import AverageMeter, reduce_loss, synchronize, cleanup, seed_everything, set_grads, log_imgs_wandb
 from data import CreateDataLoader
 from data.unaligned_dataset import UnAlignedDataset
-from models.custom_unet import Unet, NLayerDiscriminator, PatchSampleF, GANLoss, PatchNCELoss
+from models.custom_unet import Unet, NLayerDiscriminator, PatchSampleF, GANLoss, PatchNCELoss, get_norm_layer, init_weights
 
 
 class TrainModel:
     def __init__(self, args):
         self.device = torch.device('cuda', args.local_rank)
-        self.netG = Unet(self_attn=True).to(self.device)
-        self.netD = NLayerDiscriminator(3).to(self.device)
-        self.netG.eval()
-        with torch.inference_mode():
-            feats = self.netG(torch.randn(1, 3, 256, 256, device=self.device), get_feat=True, encode_only=True)
-        self.netF = PatchSampleF(use_mlp=True)
+        self.netG = Unet(args.input_nc, args.output_nc, 32, self_attn=False).to(self.device)
+        init_weights(self.netG, args.init_type, args.init_gain)
+        norm_layer = get_norm_layer(args.normD)
+        self.netD = NLayerDiscriminator(args.output_nc, args.ndf, args.n_layers_D, norm_layer).to(self.device)
+        init_weights(self.netD, args.init_type, args.init_gain)
+        with torch.no_grad():
+            feats = self.netG(torch.randn(8, args.input_nc, 256, 512, device=self.device), get_feat=True, encode_only=True)
+        self.netF = PatchSampleF(use_mlp=True, nc=args.netF_nc)
         self.netF.create_mlp(feats)
+        self.netF = self.netF.to(self.device)
+        init_weights(self.netF, args.init_type, args.init_gain)
+        summary(self.netG, (1, args.input_nc, 256, 512))
+        summary(self.netD, (1, args.output_nc, 256, 512))
+        summary(self.netF, input_data=[feats])
         dist.init_process_group(backend="nccl")
         if args.sync_bn:
             self.netG = nn.SyncBatchNorm.convert_sync_batchnorm(self.netG)
@@ -46,22 +52,24 @@ class TrainModel:
                         broadcast_buffers=False)
 
         self.criterion_gan = GANLoss()
-        self.criterionNCE = []
-        for _ in range(len(feats)):
-            self.criterionNCE.append(PatchNCELoss(args).to(self.device))
+        self.criterionNCE = [PatchNCELoss(args).to(self.device) for _ in range(len(feats))]
         self.loss_names = ['lossG', 'lossD', 'nce_loss_tot']
-        dataset = UnAlignedDataset(args.dataroot, 512, args.phase)
+        dataset = UnAlignedDataset(args.dataroot, (256, 512), args.phase)
         self.dataloader = CreateDataLoader(dataset, args.batch_size, workers=args.workers)
-        dataset = UnAlignedDataset(args.dataroot, 512, args.phase)
         # if args.local_rank == 0:
         #     val_dataset = UnAlignedDataset(args.dataroot, 1024, phase="test")
         #     val_dataset.img_names = val_dataset.img_names[:20]
         #     self.val_loader = CreateDataLoader(val_dataset, 2, workers=args.workers, shuffle=False, distributed=False)
 
-        self.optG = optim.AdamW(self.netG.parameters(), lr=args.lr, betas=(args.beta1, args.beta2), weight_decay=args.wd)
-        self.optD = optim.AdamW(self.netD.parameters(), lr=args.lr, betas=(args.beta1, args.beta2), weight_decay=args.wd)
-        self.optF = optim.AdamW(self.netF.parameters(), lr=args.lr, betas=(args.beta1, args.beta2), weight_decay=args.wd)
+        self.optG = optim.Adam(self.netG.parameters(), lr=args.lr, betas=(args.beta1, args.beta2))#, weight_decay=args.wd)
+        self.optD = optim.Adam(self.netD.parameters(), lr=args.lr, betas=(args.beta1, args.beta2))#, weight_decay=args.wd)
+        self.optF = optim.Adam(self.netF.parameters(), lr=args.lr, betas=(args.beta1, args.beta2))#, weight_decay=args.wd)
         self.scaler = amp.GradScaler(enabled=not args.no_amp)
+
+        def lambda_rule(epoch):
+            lr_l = 1.0 - max(0, epoch + args.init_epoch - args.n_epochs) / float(args.n_epochs_decay + 1)
+            return lr_l
+        self.schedulers = [lr_scheduler.LambdaLR(opt, lr_lambda=lambda_rule) for opt in [self.optG, self.optD, self.optF]]
 
 
     def calculate_NCE_loss(self, args, feat_k, feat_q):
@@ -83,8 +91,19 @@ class TrainModel:
             fake_B = pred[:batch_size]
             idt_B = pred[batch_size:]
 
-            fake_out = self.netD(fake_B)
+            fake_out = self.netD(fake_B)#.detach())
             real_out = self.netD(real_B)
+
+            lossD = (self.criterion_gan(fake_out, False)
+                     + self.criterion_gan(real_out, True)) * 0.5
+
+            # self.scaler.scale(lossD).backward()
+            set_grads(autograd.grad(self.scaler.scale(lossD), self.netD.parameters(), retain_graph=True), self.netD.parameters())
+            self.scaler.step(self.optD)
+            self.optD.zero_grad(set_to_none=True)
+
+            # fake_out = self.netD(fake_B)
+            lossG = self.criterion_gan(fake_out, True) * args.lambda_GAN
 
             feat_q = self.netG(fake_B, get_feat=True, encode_only=True)
             feat_k = [ft[:batch_size] for ft in feats]
@@ -95,24 +114,19 @@ class TrainModel:
             nce_loss_B = self.calculate_NCE_loss(args, feat_k, feat_q)
 
             nce_loss_tot = (nce_loss_A + nce_loss_B) * 0.5
-            lossG = self.criterion_gan(fake_out, True) * args.lambda_GAN + nce_loss_tot
-            lossD = (self.criterion_gan(fake_out, False)
-                     + self.criterion_gan(real_out, True)) * 0.5
-
-        gradsD = autograd.grad(self.scaler.scale(lossD), self.netD.parameters(), retain_graph=True)
+            lossG = lossG + nce_loss_tot
+        
         GF_params = list(self.netG.parameters()) + list(self.netF.parameters())
-        gradsG = autograd.grad(self.scaler.scale(lossG), GF_params)
-        set_grads(gradsD, self.netD.parameters())
-        set_grads(gradsG, GF_params)
-        del gradsG, gradsD
+        set_grads(autograd.grad(self.scaler.scale(lossG), GF_params), GF_params)
+
+        # self.scaler.scale(lossG).backward()
 
         self.scaler.step(self.optG)
         self.optG.zero_grad(set_to_none=True)
         self.scaler.step(self.optF)
         self.optF.zero_grad(set_to_none=True)
-        # if lossD>=args.min_lossD:
-        self.scaler.step(self.optD)
-        self.optD.zero_grad(set_to_none=True)
+
+        self.scaler.update()
 
         self.loss_avg['lossG'].update(reduce_loss(lossG.detach()), batch_size)
         self.loss_avg['lossD'].update(reduce_loss(lossD.detach()), batch_size)
@@ -137,15 +151,17 @@ class TrainModel:
                             wandb.log(info)
                             if not step % args.img_log_interval:
                                 log_imgs_wandb(real_A=real_A, fake_B=fake_B, real_B=real_B, idt_B=idt_B)
-                if args.lr_schedule:
-                    self.lr_scheduler.step()
-                self.scaler.update()
+                
+        for schd in self.schedulers:
+            schd.step()
         return info
 
     def train_loop(self, args):
         # self.validate(args)
-        self.netG.train()
         for epoch in range(args.init_epoch, args.n_epochs):
+            self.netG.train()
+            self.netD.train()
+            self.netF.train()
             self.dataloader.sampler.set_epoch(epoch)
             info = self.train_epoch(args, epoch)
             info['epoch'] = epoch
@@ -153,34 +169,16 @@ class TrainModel:
                 if args.use_wandb:
                     wandb.log({'epoch': epoch})
             self.save_models(args, 'latest', info)
-            if not epoch % 2:
+            if not epoch % 1:
                 self.save_models(args, epoch, info)
-                self.validate(args)
-
-    # @torch.no_grad()
-    # def validate(self, args):
-    #     if args.local_rank != 0 or not args.use_wandb:
-    #         return
-    #     self.netG.eval()
-    #     im_dict = {"val_inp": [], "val_pred": [], "val_lbl": []}
-    #     with tqdm(self.val_loader, desc=f"Validating") as pbar:
-    #         for step, (img, lbl) in enumerate(pbar):
-    #             img = img.to(self.device, non_blocking=True)
-    #             with amp.autocast(enabled=not args.no_amp):
-    #                 pred = self.netG(img)
-    #             im_dict["val_inp"] += [wandb.Image(im) for im in tensors2im(img)]
-    #             im_dict["val_lbl"] += [wandb.Image(im) for im in tensors2im(lbl)]
-    #             im_dict["val_pred"] += [wandb.Image(im) for im in tensors2im(pred)]
-    #     wandb.log(im_dict)
-    #     self.netG.train()
+                # self.validate(args)
 
     def save_models(self, args, epoch='latest', info={}):
         if args.local_rank == 0:
-            if not os.path.exists(args.checkpoints_dir):
-                os.makedirs(args.checkpoints_dir)
-            torch.save(self.netG.state_dict(), os.path.join(args.checkpoints_dir, f"unetG_{epoch}.pth"))
-            torch.save(self.optG.state_dict(), os.path.join(args.checkpoints_dir, f"optG_{epoch}.pth"))
-            torch.save(info, os.path.join(args.checkpoints_dir, f"info_{epoch}.pth"))
+            os.makedirs(os.path.join(args.checkpoints_dir, args.name), exist_ok=True)
+            torch.save(self.netG.state_dict(), os.path.join(args.checkpoints_dir, args.name, f"unetG_{epoch}.pth"))
+            torch.save(self.optG.state_dict(), os.path.join(args.checkpoints_dir, args.name, f"optG_{epoch}.pth"))
+            torch.save(info, os.path.join(args.checkpoints_dir, args.name, f"info_{epoch}.pth"))
             print("[+] Weights saved.")
 
     def load_models(self, args, epoch='latest'):
@@ -188,10 +186,10 @@ class TrainModel:
         map_location = {'cuda:0': f'cuda:{args.local_rank}'}
         try:
             self.netG.load_state_dict(torch.load(os.path.join(
-                args.checkpoints_dir, f"unetG_{epoch}.pth"), map_location=map_location))
+                args.checkpoints_dir, args.name, f"unetG_{epoch}.pth"), map_location=map_location))
             if args.phase == 'train':
                 self.optG.load_state_dict(torch.load(os.path.join(
-                    args.checkpoints_dir, f"optG_{epoch}.pth"), map_location=map_location))
+                    args.checkpoints_dir, args.name, f"optG_{epoch}.pth"), map_location=map_location))
             if args.local_rank == 0:
                 print(f"[+] Weights loaded for {epoch} epoch.")
         except FileNotFoundError as e:
@@ -205,7 +203,8 @@ def main():
     seed_everything(args.seed)
     try:
         tm = TrainModel(args)
-        tm.load_models(args)
+        if args.resume:
+            tm.load_models(args)
         tm.train_loop(args)
         tm.save_models(args)
     except KeyboardInterrupt:

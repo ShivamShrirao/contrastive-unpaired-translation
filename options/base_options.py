@@ -1,9 +1,11 @@
 import argparse
 import os
-from util import util
+from utils import str2bool, mkdirs
 import torch
-import models
-import data
+import wandb
+import json
+import time
+import os.path as osp
 
 
 class BaseOptions():
@@ -25,66 +27,41 @@ class BaseOptions():
         # basic parameters
         parser.add_argument('--dataroot', default='placeholder', help='path to images (should have subfolders trainA, trainB, valA, valB, etc)')
         parser.add_argument('--name', type=str, default='exeriment_name', help='name of the experiment. It decides where to store samples and models')
-        parser.add_argument('--easy_label', type=str, default='experiment_name', help='Interpretable name')
-        parser.add_argument('--gpu_ids', type=str, default='0', help='gpu ids: e.g. 0  0,1,2, 0,2. use -1 for CPU')
         parser.add_argument('--checkpoints_dir', type=str, default='./checkpoints', help='models are saved here')
         # model parameters
-        parser.add_argument('--model', type=str, default='cut', help='chooses which model to use.')
         parser.add_argument('--input_nc', type=int, default=3, help='# of input image channels: 3 for RGB and 1 for grayscale')
         parser.add_argument('--output_nc', type=int, default=3, help='# of output image channels: 3 for RGB and 1 for grayscale')
         parser.add_argument('--ngf', type=int, default=64, help='# of gen filters in the last conv layer')
         parser.add_argument('--ndf', type=int, default=64, help='# of discrim filters in the first conv layer')
-        parser.add_argument('--netG', type=str, default='resnet_9blocks', choices=['resnet_9blocks', 'resnet_6blocks', 'unet_256', 'unet_128', 'stylegan2', 'smallstylegan2', 'resnet_cat','ffc'], help='specify generator architecture')
-        parser.add_argument('--netD', type=str, default='n_layers', choices=['basic', 'n_layers', 'pixel', 'patch', 'tilestylegan2', 'stylegan2'], help='specify discriminator architecture. The basic model is a 70x70 PatchGAN. n_layers allows you to specify the layers in the discriminator')
         parser.add_argument('--n_layers_D', type=int, default=3, help='only used if netD==n_layers')
         parser.add_argument('--normG', type=str, default='instance', choices=['instance', 'batch', 'none'], help='instance normalization or batch normalization for G')
         parser.add_argument('--normD', type=str, default='instance', choices=['instance', 'batch', 'none'], help='instance normalization or batch normalization for D')
         parser.add_argument('--init_type', type=str, default='xavier', choices=['normal', 'xavier', 'kaiming', 'orthogonal'], help='network initialization')
         parser.add_argument('--init_gain', type=float, default=0.02, help='scaling factor for normal, xavier and orthogonal.')
-        parser.add_argument('--no_dropout', type=util.str2bool, nargs='?', const=True, default=True,
+        parser.add_argument('--no_dropout', type=str2bool, nargs='?', const=True, default=True,
                             help='no dropout for the generator')
         parser.add_argument('--no_antialias', action='store_true', help='if specified, use stride=2 convs instead of antialiased-downsampling (sad)')
         parser.add_argument('--no_antialias_up', action='store_true', help='if specified, use [upconv(learned filter)] instead of [upconv(hard-coded [1,3,3,1] filter), conv]')
         # dataset parameters
-        parser.add_argument('--dataset_mode', type=str, default='unaligned', help='chooses how datasets are loaded. [unaligned | aligned | single | colorization]')
-        parser.add_argument('--direction', type=str, default='AtoB', help='AtoB or BtoA')
-        parser.add_argument('--serial_batches', action='store_true', help='if true, takes images in order to make batches, otherwise takes them randomly')
-        parser.add_argument('--num_threads', default=4, type=int, help='# threads for loading data')
         parser.add_argument('--batch_size', type=int, default=1, help='input batch size')
-        parser.add_argument('--load_size', type=int, default=286, help='scale images to this size')
-        parser.add_argument('--crop_size', type=int, default=256, help='then crop to this size')
-        parser.add_argument('--max_dataset_size', type=int, default=float("inf"), help='Maximum number of samples allowed per dataset. If the dataset directory contains more than max_dataset_size, only a subset is loaded.')
-        parser.add_argument('--preprocess', type=str, default='resize_and_crop', help='scaling and cropping of images at load time [resize_and_crop | crop | scale_width | scale_width_and_crop | none]')
-        parser.add_argument('--no_flip', action='store_true', help='if specified, do not flip the images for data augmentation')
-        parser.add_argument('--display_winsize', type=int, default=256, help='display window size for both visdom and HTML')
-        parser.add_argument('--random_scale_max', type=float, default=3.0,
-                            help='(used for single image translation) Randomly scale the image by the specified factor as data augmentation.')
-        # additional parameters
-        parser.add_argument('--epoch', type=str, default='latest', help='which epoch to load? set to latest to use latest cached model')
-        parser.add_argument('--verbose', action='store_true', help='if specified, print more debugging information')
-        parser.add_argument('--suffix', default='', type=str, help='customized suffix: opt.name = opt.name + suffix: e.g., {model}_{netG}_size{load_size}')
+        parser.add_argument('--workers', type=int, default=8, metavar="N", help="Number of workers for dataloader.")
         parser.add_argument('--seed', type=int, default=1337, metavar="N", help="Random seed.")
-
-        # parameters related to StyleGAN2-based networks
-        parser.add_argument('--stylegan2_G_num_downsampling',
-                            default=1, type=int,
-                            help='Number of downsampling layers used by StyleGAN2Generator')
 
         parser.add_argument('--CUT_mode', type=str, default="CUT", choices='(CUT, cut, FastCUT, fastcut)')
 
         parser.add_argument('--lambda_GAN', type=float, default=1.0, help='weight for GAN loss：GAN(G(X))')
         parser.add_argument('--lambda_NCE', type=float, default=1.0, help='weight for NCE loss: NCE(G(X), X)')
-        parser.add_argument('--nce_idt', type=util.str2bool, nargs='?', const=True, default=False, help='use NCE loss for identity mapping: NCE(G(Y), Y))')
+        parser.add_argument('--nce_idt', type=str2bool, nargs='?', const=True, default=False, help='use NCE loss for identity mapping: NCE(G(Y), Y))')
         parser.add_argument('--nce_layers', type=str, default='0,4,8,12,16', help='compute NCE loss on which layers')
         parser.add_argument('--nce_includes_all_negatives_from_minibatch',
-                            type=util.str2bool, nargs='?', const=True, default=False,
+                            type=str2bool, nargs='?', const=True, default=False,
                             help='(used for single image translation) If True, include the negatives from the other samples of the minibatch when computing the contrastive loss. Please see models/patchnce.py for more details.')
         parser.add_argument('--netF', type=str, default='mlp_sample', choices=['sample', 'reshape', 'mlp_sample'], help='how to downsample the feature map')
         parser.add_argument('--netF_nc', type=int, default=256)
         parser.add_argument('--nce_T', type=float, default=0.07, help='temperature for NCE loss')
         parser.add_argument('--num_patches', type=int, default=256, help='number of patches per layer')
         parser.add_argument('--flip_equivariance',
-                            type=util.str2bool, nargs='?', const=True, default=False,
+                            type=str2bool, nargs='?', const=True, default=False,
                             help="Enforce flip-equivariance as additional regularization. It's used by FastCUT, but not CUT")
 
         parser.set_defaults(pool_size=0)
@@ -160,7 +137,7 @@ class BaseOptions():
 
         # save to the disk
         expr_dir = os.path.join(opt.checkpoints_dir, opt.name)
-        util.mkdirs(expr_dir)
+        mkdirs(expr_dir)
         file_name = os.path.join(expr_dir, '{}_opt.txt'.format(opt.phase))
         try:
             with open(file_name, 'wt') as opt_file:
@@ -175,27 +152,41 @@ class BaseOptions():
         opt = self.gather_options()
         opt.isTrain = self.isTrain   # train or test
 
-        # process opt.suffix
-        if opt.suffix:
-            suffix = ('_' + opt.suffix.format(**vars(opt))) if opt.suffix != '' else ''
-            opt.name = opt.name + suffix
-
         self.print_options(opt)
-
-        # set gpu ids
-        str_ids = opt.gpu_ids.split(',')
-        opt.gpu_ids = []
-        for str_id in str_ids:
-            id = int(str_id)
-            if id >= 0:
-                opt.gpu_ids.append(id)
-        if len(opt.gpu_ids) > 0:
-            torch.cuda.set_device(opt.gpu_ids[0])
         
         try:
             opt.local_rank = int(os.environ["LOCAL_RANK"])
         except KeyError:
             opt.local_rank = 0
+        
+        if opt.use_wandb:
+            if opt.local_rank == 0:
+                if opt.resume:
+                    run = wandb.init(id=opt.resume, project=opt.project, resume='must')
+                    try:
+                        epoch = run.summary['epoch']
+                    except KeyError:
+                        epoch = 0
+                    wandb.config.update(dict(init_epoch=epoch+1, resume=opt.resume, epochs=opt.epochs,
+                                        img_log_interval=opt.img_log_interval), allow_val_change=True)
+                    # To resume in distributed training
+                    os.makedirs(osp.join('wandb', opt.resume), exist_ok=True)
+                    outf = osp.join('wandb', opt.resume, 'config.json')
+                    with open(outf, 'w') as fp:
+                        sh_arg = vars(wandb.config)["_items"].copy()
+                        del sh_arg['local_rank']
+                        json.dump(sh_arg, fp)
+                else:
+                    run = wandb.init(project=opt.project)
+                    wandb.config.update(opt)
+                opt = wandb.config
+            elif opt.resume:
+                # To resume in distributed training
+                outf = osp.join('wandb', opt.resume, 'config.json')
+                while not osp.exists(outf):
+                    time.sleep(0.1)
+                with open(outf, 'r') as fp:
+                    vars(opt).update(json.load(fp))
 
         self.opt = opt
         return self.opt
