@@ -167,7 +167,7 @@ class BaseOptions():
                         epoch = run.summary['epoch']
                     except KeyError:
                         epoch = 0
-                    wandb.config.update(dict(init_epoch=epoch+1, resume=opt.resume, epochs=opt.epochs,
+                    wandb.config.update(dict(init_epoch=epoch+1, resume=opt.resume, epochs=opt.n_epochs,
                                         img_log_interval=opt.img_log_interval), allow_val_change=True)
                     # To resume in distributed training
                     os.makedirs(osp.join('wandb', opt.resume), exist_ok=True)

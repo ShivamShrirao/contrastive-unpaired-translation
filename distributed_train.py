@@ -1,4 +1,5 @@
 import os
+from os.path import join as osp
 import numpy as np
 from tqdm import tqdm
 
@@ -13,7 +14,7 @@ import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch import autograd
 from torch.optim import lr_scheduler
-from torchinfo import summary
+# from torchinfo import summary
 
 from options.train_options import TrainOptions
 from utils import AverageMeter, reduce_loss, synchronize, cleanup, seed_everything, set_grads, log_imgs_wandb
@@ -26,19 +27,19 @@ class TrainModel:
     def __init__(self, args):
         self.device = torch.device('cuda', args.local_rank)
         self.netG = Unet(args.input_nc, args.output_nc, 32, self_attn=False).to(self.device)
-        init_weights(self.netG, args.init_type, args.init_gain)
+        # init_weights(self.netG, args.init_type, args.init_gain)
         norm_layer = get_norm_layer(args.normD)
         self.netD = NLayerDiscriminator(args.output_nc, args.ndf, args.n_layers_D, norm_layer).to(self.device)
-        init_weights(self.netD, args.init_type, args.init_gain)
+        # init_weights(self.netD, args.init_type, args.init_gain)
         with torch.no_grad():
             feats = self.netG(torch.randn(8, args.input_nc, 256, 512, device=self.device), get_feat=True, encode_only=True)
         self.netF = PatchSampleF(use_mlp=True, nc=args.netF_nc)
         self.netF.create_mlp(feats)
         self.netF = self.netF.to(self.device)
-        init_weights(self.netF, args.init_type, args.init_gain)
-        summary(self.netG, (1, args.input_nc, 256, 512))
-        summary(self.netD, (1, args.output_nc, 256, 512))
-        summary(self.netF, input_data=[feats])
+        # init_weights(self.netF, args.init_type, args.init_gain)
+        # summary(self.netG, (1, args.input_nc, 256, 512))
+        # summary(self.netD, (1, args.output_nc, 256, 512))
+        # summary(self.netF, input_data=[feats])
         dist.init_process_group(backend="nccl")
         if args.sync_bn:
             self.netG = nn.SyncBatchNorm.convert_sync_batchnorm(self.netG)
@@ -65,6 +66,7 @@ class TrainModel:
         self.optD = optim.Adam(self.netD.parameters(), lr=args.lr, betas=(args.beta1, args.beta2))#, weight_decay=args.wd)
         self.optF = optim.Adam(self.netF.parameters(), lr=args.lr, betas=(args.beta1, args.beta2))#, weight_decay=args.wd)
         self.scaler = amp.GradScaler(enabled=not args.no_amp)
+        self.GF_params = list(self.netG.parameters()) + list(self.netF.parameters())
 
         def lambda_rule(epoch):
             lr_l = 1.0 - max(0, epoch + args.init_epoch - args.n_epochs) / float(args.n_epochs_decay + 1)
@@ -116,9 +118,7 @@ class TrainModel:
             nce_loss_tot = (nce_loss_A + nce_loss_B) * 0.5
             lossG = lossG + nce_loss_tot
         
-        GF_params = list(self.netG.parameters()) + list(self.netF.parameters())
-        set_grads(autograd.grad(self.scaler.scale(lossG), GF_params), GF_params)
-
+        set_grads(autograd.grad(self.scaler.scale(lossG), self.GF_params), self.GF_params)
         # self.scaler.scale(lossG).backward()
 
         self.scaler.step(self.optG)
@@ -175,21 +175,27 @@ class TrainModel:
 
     def save_models(self, args, epoch='latest', info={}):
         if args.local_rank == 0:
-            os.makedirs(os.path.join(args.checkpoints_dir, args.name), exist_ok=True)
-            torch.save(self.netG.state_dict(), os.path.join(args.checkpoints_dir, args.name, f"unetG_{epoch}.pth"))
-            torch.save(self.optG.state_dict(), os.path.join(args.checkpoints_dir, args.name, f"optG_{epoch}.pth"))
-            torch.save(info, os.path.join(args.checkpoints_dir, args.name, f"info_{epoch}.pth"))
+            os.makedirs(osp(args.checkpoints_dir, args.name), exist_ok=True)
+            torch.save(self.netG.state_dict(), osp(args.checkpoints_dir, args.name, f"{epoch}_netG.pth"))
+            torch.save(self.netD.state_dict(), osp(args.checkpoints_dir, args.name, f"{epoch}_netD.pth"))
+            torch.save(self.netF.state_dict(), osp(args.checkpoints_dir, args.name, f"{epoch}_netF.pth"))
+            # torch.save(self.optG.state_dict(), osp(args.checkpoints_dir, args.name, f"{epoch}_optG.pth"))
+            # torch.save(self.optD.state_dict(), osp(args.checkpoints_dir, args.name, f"{epoch}_optD.pth"))
+            # torch.save(self.optF.state_dict(), osp(args.checkpoints_dir, args.name, f"{epoch}_optF.pth"))
+            torch.save(info, osp(args.checkpoints_dir, args.name, f"{epoch}_info.pth"))
             print("[+] Weights saved.")
 
     def load_models(self, args, epoch='latest'):
         synchronize()
         map_location = {'cuda:0': f'cuda:{args.local_rank}'}
         try:
-            self.netG.load_state_dict(torch.load(os.path.join(
-                args.checkpoints_dir, args.name, f"unetG_{epoch}.pth"), map_location=map_location))
+            self.netG.load_state_dict(torch.load(osp(args.checkpoints_dir, args.name, f"{epoch}_netG.pth"), map_location=map_location))
             if args.phase == 'train':
-                self.optG.load_state_dict(torch.load(os.path.join(
-                    args.checkpoints_dir, args.name, f"optG_{epoch}.pth"), map_location=map_location))
+                self.netD.load_state_dict(torch.load(osp(args.checkpoints_dir, args.name, f"{epoch}_netD.pth"), map_location=map_location))
+                self.netF.load_state_dict(torch.load(osp(args.checkpoints_dir, args.name, f"{epoch}_netF.pth"), map_location=map_location))
+                # self.optG.load_state_dict(torch.load(osp(args.checkpoints_dir, args.name, f"{epoch}_optG.pth"), map_location=map_location))
+                # self.optD.load_state_dict(torch.load(osp(args.checkpoints_dir, args.name, f"{epoch}_optD.pth"), map_location=map_location))
+                # self.optF.load_state_dict(torch.load(osp(args.checkpoints_dir, args.name, f"{epoch}_optF.pth"), map_location=map_location))
             if args.local_rank == 0:
                 print(f"[+] Weights loaded for {epoch} epoch.")
         except FileNotFoundError as e:
@@ -203,8 +209,8 @@ def main():
     seed_everything(args.seed)
     try:
         tm = TrainModel(args)
-        if args.resume:
-            tm.load_models(args)
+        # if args.resume:
+        tm.load_models(args)
         tm.train_loop(args)
         tm.save_models(args)
     except KeyboardInterrupt:
