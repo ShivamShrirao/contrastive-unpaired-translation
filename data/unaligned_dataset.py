@@ -62,7 +62,7 @@ class UnAlignedDataset(data.Dataset):
         B = cv2.cvtColor(B, cv2.COLOR_BGR2RGB)
         data = self.aug_transform(image=A, image0=B)
         A, B = data['image'], data['image0']
-        if random.uniform(0,1) < 0.2:
+        if random.uniform(0,1) < 0.3:
             A = self.overlay_refl(A)
         return A, B
 
