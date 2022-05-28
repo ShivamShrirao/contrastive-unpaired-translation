@@ -17,6 +17,49 @@ def icnr_init(x, scale=2, init=nn.init.kaiming_normal_):
     return k.contiguous().view([nf, ni, h, w]).transpose(0, 1)
 
 
+class PixelShuffle_ICNR(nn.Sequential):
+    def __init__(self, ni, nf, scale=2, blur=True, act_cls=nn.ReLU, spectral=False, norm_lyr=nn.BatchNorm2d):
+        super().__init__()
+        layers = [ConvNorm(ni, nf * (scale**2), ks=1, bn=False, act_cls=act_cls, spectral=spectral,
+                           icnr=True, norm_lyr=norm_lyr),
+                  nn.PixelShuffle(scale)]
+        if blur:
+            layers += [nn.ReplicationPad2d((1, 0, 1, 0)), nn.AvgPool2d(2, stride=1)]
+        super().__init__(*layers)
+
+
+class SqueezeExcite(nn.Module):
+    def __init__(self, ch, reduction, act_cls=nn.ReLU) -> None:
+        super().__init__()
+        nf = ch // reduction
+        self.sq = nn.Sequential(
+            nn.AdaptiveAvgPool2d(1),
+            ConvNorm(ch, nf, ks=1, bn=False, act_cls=act_cls),
+            ConvNorm(nf, ch, ks=1, bn=False, act_cls=nn.Sigmoid)
+        )
+
+    def forward(self, x):
+        return x * self.sq(x)
+
+
+class SelfAttention(nn.Module):
+    def __init__(self, n_channels):
+        super().__init__()
+        self.qkv_c = (n_channels // 8, n_channels // 8, n_channels)
+        self.to_qkv = nn.Conv2d(n_channels, sum(self.qkv_c), kernel_size=1, bias=False)
+        self.gamma = nn.Parameter(torch.tensor([0.]))
+
+    def forward(self, x):       # [B, C, H, W]
+        size = x.size()
+        qkv = self.to_qkv(x)
+        q, k, v = qkv.flatten(2).split(self.qkv_c, dim=1)   # [B, (dq,dk,dv), H*W]
+        attn = F.softmax(torch.bmm(q.transpose(1, 2), k), dim=1)  # [B, lq, lk]
+        o = torch.bmm(v, attn)
+        o = o.view(*size)  # .contiguous()
+        o = self.gamma * o + x
+        return o
+
+
 class ConvNorm(nn.Module):
     def __init__(self, ni, nf, ks=3, stride=1, padding=None, groups=1, bias=None, bn=True, bn_zero=False,
                  act_cls=nn.ReLU, norm_lyr=nn.BatchNorm2d, spectral=False, icnr=False):
@@ -53,6 +96,72 @@ class ConvNorm(nn.Module):
         return x
 
 
+def model_sizes(encoder, size):
+    with torch.no_grad():
+        data = torch.randn(1, 3, *size, device=next(encoder.parameters()).device)
+        out = encoder(data)
+    return [i.shape for i in out]
+
+
+class DynamicUnet(nn.Module):
+    def __init__(self, encoder, n_inp, n_out, imsize=(256, 256), act_cls=nn.ReLU, norm_lyr=nn.InstanceNorm2d, spectral=True,
+                 self_attn=False, blur=True):
+        super().__init__()
+        sizes = model_sizes(encoder, size=imsize)
+        print(sizes)
+        ni = sizes[-1][1]
+        self.encoder = encoder
+        middle_conv = nn.Sequential(ConvNorm(ni, ni * 2, act_cls=act_cls, norm_lyr=norm_lyr),
+                                    ConvNorm(ni * 2, ni, act_cls=act_cls, norm_lyr=norm_lyr))
+        self.mid = nn.Sequential(norm_lyr(ni), act_cls(), middle_conv)
+        self.unet_blocks = nn.ModuleList()
+        sizes = sizes[:-1]
+        for i, sz in enumerate(sizes[::-1]):
+            not_final = i != len(sizes) - 1
+            sa = self_attn and (i == len(sizes) - 3)
+            nim = ni // 2 + sz[1]
+            nf = nim if not_final else nim // 2
+            unet_block = UnetBlock(ni, nf, sz[1], blur=blur, self_attn=sa,
+                                   act_cls=act_cls, spectral=spectral, norm_lyr=norm_lyr)
+            self.unet_blocks.append(unet_block)
+            ni = nf
+        self.pix_up = PixelShuffle_ICNR(ni, ni, act_cls=act_cls, norm_lyr=norm_lyr)
+        ni += n_inp
+        self.last_cross = ResBlock(ni, ni, act_cls=act_cls, norm_lyr=norm_lyr)
+        self.conv_out = ConvNorm(ni, n_out, ks=1, act_cls=None, bn=False)
+
+    def forward(self, inp):
+        feats = self.encoder(inp)
+        x = self.mid(feats[-1])
+        feats = feats[:-1]
+        for ft, lyr in zip(feats[::-1], self.unet_blocks):
+            x = lyr(x, ft)
+        x = self.pix_up(x)
+        x = torch.cat([x, inp], dim=1)
+        x = self.last_cross(x)
+        x = self.conv_out(x)
+        return torch.tanh(x)
+
+
+class UnetBlock(nn.Module):
+    def __init__(self, ni, nf, skip_in, blur=True, act_cls=nn.ReLU,
+                 self_attn=False, spectral=True, norm_lyr=nn.BatchNorm2d):
+        super().__init__()
+        self.pix_shuf = PixelShuffle_ICNR(ni, ni // 2, blur=blur, act_cls=act_cls,
+                                          spectral=spectral, norm_lyr=norm_lyr)
+        rin = ni // 2 + skip_in
+        self.resb = ResBlock(rin, nf, spectral=spectral, act_cls=act_cls, self_attn=self_attn, norm_lyr=norm_lyr)
+        self.act = act_cls()
+        self.bn = norm_lyr(skip_in)
+
+    def forward(self, x, skip=None):
+        x = self.pix_shuf(x)
+        # x = F.interpolate(x, skip.shape[-2:], mode='nearest')
+        if skip is not None:
+            x = self.act(torch.cat([x, self.bn(skip)], dim=1))
+        return self.resb(x)
+
+
 class ResBlock(nn.Module):
     def __init__(self, ni, nf, ks=3, stride=1, groups=1, reduction=0, spectral=False,
                  act_cls=nn.ReLU, self_attn=False, norm_lyr=nn.BatchNorm2d):
@@ -81,126 +190,7 @@ class ResBlock(nn.Module):
         inp = x
         x = self.conv2(self.conv1(x))
         x = self.atn(x)
-        return self.act(x.add_(self.shortcut(inp)))
-
-
-class UnetBlock(nn.Module):
-    def __init__(self, ni, nf, skip_in, blur=True, act_cls=nn.ReLU, groups=1,
-                 self_attn=False, reduction=0, spectral=False, norm_lyr=nn.BatchNorm2d):
-        super().__init__()
-        self.pix_shuf = PixelShuffle_ICNR(ni, ni // 2, blur=blur, act_cls=act_cls,
-                                          spectral=spectral, norm_lyr=norm_lyr)
-        rin = ni // 2 + skip_in
-        self.resb = ResBlock(rin, nf, groups=groups, reduction=reduction, spectral=spectral,
-                             act_cls=act_cls, self_attn=self_attn, norm_lyr=norm_lyr)
-
-    def forward(self, x, skip=None):
-        x = self.pix_shuf(x)
-        # x = F.interpolate(x, skip.shape[-2:], mode='nearest')
-        if skip is not None:
-            x = torch.cat([x, skip], dim=1)
-        return self.resb(x)
-
-
-class PixelShuffle_ICNR(nn.Sequential):
-    def __init__(self, ni, nf, scale=2, blur=True, act_cls=nn.ReLU, spectral=False, norm_lyr=nn.BatchNorm2d):
-        super().__init__()
-        layers = [ConvNorm(ni, nf * (scale**2), ks=1, bn=False, act_cls=act_cls, spectral=spectral,
-                           icnr=True, norm_lyr=norm_lyr),
-                  nn.PixelShuffle(scale)]
-        if blur:
-            layers += [nn.ReplicationPad2d((1, 0, 1, 0)), nn.AvgPool2d(2, stride=1)]
-        super().__init__(*layers)
-
-
-class SqueezeExcite(nn.Module):
-    def __init__(self, ch, reduction, act_cls=nn.ReLU) -> None:
-        super().__init__()
-        nf = ch // reduction
-        self.sq = nn.Sequential(
-            nn.AdaptiveAvgPool2d(1),
-            ConvNorm(ch, nf, ks=1, bn=False, act_cls=act_cls),
-            ConvNorm(nf, ch, ks=1, bn=False, act_cls=nn.Sigmoid)
-        )
-
-    def forward(self, x):
-        return x * self.sq(x)
-
-
-class SelfAttention(nn.Module):
-    def __init__(self, n_channels):
-        super().__init__()
-        self.qkv_c = (n_channels // 8, n_channels // 8, n_channels)
-        self.to_qkv = spectral_norm(nn.Conv2d(n_channels, sum(self.qkv_c), kernel_size=1, bias=False))
-        self.gamma = nn.Parameter(torch.tensor([0.]))
-
-    def forward(self, x):       # [B, C, H, W]
-        size = x.size()
-        qkv = self.to_qkv(x)
-        q, k, v = qkv.flatten(2).split(self.qkv_c, dim=1)   # [B, (dq,dk,dv), H*W]
-        attn = F.softmax(torch.bmm(q.transpose(1, 2), k), dim=1)  # [B, lq, lk]
-        o = torch.bmm(v, attn)
-        del attn, q, k, v, qkv
-        o = o.view(*size)  # .contiguous()
-        o = o.mul_(self.gamma) + x
-        return o
-
-
-class Unet(nn.Module):
-    def __init__(self, in_c=3, out_c=3, ngf=32, num_scale=1, groups=32, reduction=16, spectral=True,
-                 self_attn=False, norm_lyr=nn.InstanceNorm2d):
-        super().__init__()
-        self.conv_in = ConvNorm(in_c, ngf, ks=3, norm_lyr=norm_lyr, act_cls=nn.ReLU)
-        kwargs = dict(groups=groups, reduction=reduction, spectral=spectral, norm_lyr=norm_lyr)
-        self.down = self.get_block(ngf, 64, num=1, **kwargs)
-        self.down0 = self.get_block(64, 96, num=1, **kwargs)
-        self.down1 = self.get_block(96, 128, num=1, self_attn=self_attn, **kwargs)
-        self.down2 = self.get_block(128, 256, num=1, **kwargs)
-        self.down3 = self.get_block(256, 512, num=1, **kwargs)
-
-        self.middle_conv = nn.Sequential()  # ConvNorm(512, 1024, spectral=spectral, norm_lyr=norm_lyr,
-        #                                           act_cls=nn.ReLU),
-        #                                  ConvNorm(1024, 512, spectral=spectral, norm_lyr=norm_lyr,
-        #                                           act_cls=nn.ReLU),
-        #                                 )
-
-        self.up3 = UnetBlock(512, 256, 256, **kwargs)
-        self.up2 = UnetBlock(256, 128, 128, **kwargs)
-        self.up1 = UnetBlock(128, 96, 96, **kwargs)
-        self.up0 = UnetBlock(96, 64, 64, **kwargs)
-        self.up = UnetBlock(64, ngf, ngf, **kwargs)
-
-        n_up = (ngf, 64, 96, 128, 256, 512)
-        self.deep_convs = nn.ModuleList([nn.Conv2d(n_up[i], out_c, kernel_size=3 if i == 0 else 1,
-                                                   padding='same') for i in range(num_scale)])
-
-    def forward(self, x, get_feat=False, encode_only=False):  # 3, 768
-        x = self.conv_in(x)        # 32, 768
-        d = self.down(x)           # 64, 384
-        d0 = self.down0(d)          # 96, 192
-        d1 = self.down1(d0)         # 128, 96
-        d2 = self.down2(d1)         # 256, 48
-        d3 = self.down3(d2)         # 512, 24
-
-        u3 = self.middle_conv(d3)   # 512, 24
-
-        u2 = self.up3(u3, d2)       # 256, 48
-        u1 = self.up2(u2, d1)       # 128, 96
-        u0 = self.up1(u1, d0)       # 96, 192
-        u = self.up0(u0, d)        # 64, 384
-        o = self.up(u, x)        # 32, 768
-        if get_feat:
-            feats = x, d0, d1, d2, d3
-            if encode_only:
-                return feats
-            else:
-                return torch.tanh(self.deep_convs[0](o)), feats
-        return torch.tanh(self.deep_convs[0](o))
-
-    def get_block(self, ni, nf, num=2, self_attn=False, **kwargs):
-        return nn.Sequential(*[ResBlock(ni if i == 0 else nf, nf, stride=2 if i == 0 else 1,
-                                        self_attn=self_attn if i == 0 else False, **kwargs)
-                               for i in range(num)])
+        return self.act(x + self.shortcut(inp))
 
 
 class PatchSampleF(nn.Module):
@@ -309,7 +299,7 @@ class PatchNCELoss(nn.Module):
 class NLayerDiscriminator(nn.Module):
     """Defines a PatchGAN discriminator"""
 
-    def __init__(self, input_nc, ndf=64, n_layers=3, norm_layer=nn.BatchNorm2d, no_antialias=False):
+    def __init__(self, input_nc, ndf=64, n_layers=3, norm_layer=nn.BatchNorm2d, no_antialias=False, gauss_std=0.1):
         """Construct a PatchGAN discriminator
 
         Parameters:
@@ -327,9 +317,12 @@ class NLayerDiscriminator(nn.Module):
         kw = 4
         padw = 1
         if(no_antialias):
-            sequence = [nn.Conv2d(input_nc, ndf, kernel_size=kw, stride=2, padding=padw), nn.LeakyReLU(0.2, True)]
+            sequence = [GaussianNoise(gauss_std), nn.Conv2d(input_nc, ndf, kernel_size=kw,
+                                                            stride=2, padding=padw), nn.LeakyReLU(0.2, True)]
         else:
-            sequence = [nn.Conv2d(input_nc, ndf, kernel_size=kw, stride=1, padding=padw), nn.LeakyReLU(0.2, True), Downsample(ndf)]
+            sequence = [GaussianNoise(gauss_std),
+                        nn.Conv2d(input_nc, ndf, kernel_size=kw, stride=1, padding=padw),
+                        nn.LeakyReLU(0.2, True), Downsample(ndf)]
         nf_mult = 1
         nf_mult_prev = 1
         for n in range(1, n_layers):  # gradually increase the number of filters
@@ -337,12 +330,14 @@ class NLayerDiscriminator(nn.Module):
             nf_mult = min(2 ** n, 8)
             if(no_antialias):
                 sequence += [
+                    GaussianNoise(gauss_std),
                     nn.Conv2d(ndf * nf_mult_prev, ndf * nf_mult, kernel_size=kw, stride=2, padding=padw, bias=use_bias),
                     norm_layer(ndf * nf_mult),
                     nn.LeakyReLU(0.2, True)
                 ]
             else:
                 sequence += [
+                    GaussianNoise(gauss_std),
                     nn.Conv2d(ndf * nf_mult_prev, ndf * nf_mult, kernel_size=kw, stride=1, padding=padw, bias=use_bias),
                     norm_layer(ndf * nf_mult),
                     nn.LeakyReLU(0.2, True),
@@ -351,12 +346,16 @@ class NLayerDiscriminator(nn.Module):
         nf_mult_prev = nf_mult
         nf_mult = min(2 ** n_layers, 8)
         sequence += [
+            GaussianNoise(gauss_std),
             nn.Conv2d(ndf * nf_mult_prev, ndf * nf_mult, kernel_size=kw, stride=1, padding=padw, bias=use_bias),
             norm_layer(ndf * nf_mult),
             nn.LeakyReLU(0.2, True)
         ]
 
-        sequence += [nn.Conv2d(ndf * nf_mult, 1, kernel_size=kw, stride=1, padding=padw)]  # output 1 channel prediction map
+        sequence += [
+            GaussianNoise(gauss_std),
+            nn.Conv2d(ndf * nf_mult, 1, kernel_size=kw, stride=1, padding=padw)
+        ]  # output 1 channel prediction map
         self.model = nn.Sequential(*sequence)
 
     def forward(self, input):
@@ -410,6 +409,7 @@ def get_filter(filt_size=3):
     filt = filt / torch.sum(filt)
     return filt
 
+
 def get_pad_layer(pad_type):
     if(pad_type in ['refl', 'reflect']):
         PadLayer = nn.ReflectionPad2d
@@ -461,7 +461,7 @@ class VGGLoss(nn.Module):
     def __init__(self) -> None:
         super().__init__()
         layer_ids = [22, 32, 42]
-        self.weights = [5, 15, 2]
+        self.weights = [5, 15, 4]
         m = vgg16_bn(pretrained=True).features.eval()
         return_nodes = {f'{x}': f'feat{i}' for i, x in enumerate(layer_ids)}
         self.vgg_fx = create_feature_extractor(m, return_nodes=return_nodes)

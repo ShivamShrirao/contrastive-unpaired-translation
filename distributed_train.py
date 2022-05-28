@@ -5,6 +5,7 @@ from tqdm import tqdm
 
 import wandb
 
+import timm
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -20,25 +21,28 @@ from options.train_options import TrainOptions
 from utils import AverageMeter, reduce_loss, synchronize, cleanup, seed_everything, set_grads, log_imgs_wandb
 from data import CreateDataLoader
 from data.unaligned_dataset import UnAlignedDataset
-from models.custom_unet import Unet, NLayerDiscriminator, PatchSampleF, GANLoss, PatchNCELoss, get_norm_layer, init_weights
+from models.custom_unet import NLayerDiscriminator, PatchSampleF, GANLoss, PatchNCELoss, get_norm_layer, DynamicUnet
 
 
 class TrainModel:
     def __init__(self, args):
         self.device = torch.device('cuda', args.local_rank)
-        self.netG = Unet(args.input_nc, args.output_nc, 32, self_attn=False).to(self.device)
+        self.img_size = (1024, 1024)
+        m = timm.create_model('seresnet34', pretrained=True, exportable=True, features_only=True).to(self.device)
+        self.netG = DynamicUnet(m, 3, 3, self_attn=True, spectral=True, norm_lyr=nn.InstanceNorm2d).to(self.device).train()
+        # self.netG = Unet(args.input_nc, args.output_nc, 32, self_attn=False).to(self.device)
         # init_weights(self.netG, args.init_type, args.init_gain)
         norm_layer = get_norm_layer(args.normD)
         self.netD = NLayerDiscriminator(args.output_nc, args.ndf, args.n_layers_D, norm_layer).to(self.device)
         # init_weights(self.netD, args.init_type, args.init_gain)
         with torch.no_grad():
-            feats = self.netG(torch.randn(8, args.input_nc, 256, 512, device=self.device), get_feat=True, encode_only=True)
+            feats = self.netG(torch.randn(8, args.input_nc, *self.img_size, device=self.device), get_feat=True, encode_only=True)
         self.netF = PatchSampleF(use_mlp=True, nc=args.netF_nc)
         self.netF.create_mlp(feats)
         self.netF = self.netF.to(self.device)
         # init_weights(self.netF, args.init_type, args.init_gain)
-        # summary(self.netG, (1, args.input_nc, 256, 512))
-        # summary(self.netD, (1, args.output_nc, 256, 512))
+        # summary(self.netG, (1, args.input_nc, *self.img_size))
+        # summary(self.netD, (1, args.output_nc, *self.img_size))
         # summary(self.netF, input_data=[feats])
         dist.init_process_group(backend="nccl")
         if args.sync_bn:
@@ -55,16 +59,16 @@ class TrainModel:
         self.criterion_gan = GANLoss()
         self.criterionNCE = [PatchNCELoss(args).to(self.device) for _ in range(len(feats))]
         self.loss_names = ['lossG', 'lossD', 'nce_loss_tot']
-        dataset = UnAlignedDataset(args.dataroot, (256, 512), args.phase)
+        dataset = UnAlignedDataset(args.dataroot, *self.img_size, args.phase)
         self.dataloader = CreateDataLoader(dataset, args.batch_size, workers=args.workers)
         # if args.local_rank == 0:
         #     val_dataset = UnAlignedDataset(args.dataroot, 1024, phase="test")
         #     val_dataset.img_names = val_dataset.img_names[:20]
         #     self.val_loader = CreateDataLoader(val_dataset, 2, workers=args.workers, shuffle=False, distributed=False)
 
-        self.optG = optim.Adam(self.netG.parameters(), lr=args.lr, betas=(args.beta1, args.beta2))#, weight_decay=args.wd)
-        self.optD = optim.Adam(self.netD.parameters(), lr=args.lr, betas=(args.beta1, args.beta2))#, weight_decay=args.wd)
-        self.optF = optim.Adam(self.netF.parameters(), lr=args.lr, betas=(args.beta1, args.beta2))#, weight_decay=args.wd)
+        self.optG = optim.Adam(self.netG.parameters(), lr=args.lr, betas=(args.beta1, args.beta2))  # , weight_decay=args.wd)
+        self.optD = optim.Adam(self.netD.parameters(), lr=args.lr, betas=(args.beta1, args.beta2))  # , weight_decay=args.wd)
+        self.optF = optim.Adam(self.netF.parameters(), lr=args.lr, betas=(args.beta1, args.beta2))  # , weight_decay=args.wd)
         self.scaler = amp.GradScaler(enabled=not args.no_amp)
         self.GF_params = list(self.netG.parameters()) + list(self.netF.parameters())
 
@@ -93,7 +97,7 @@ class TrainModel:
             fake_B = pred[:batch_size]
             idt_B = pred[batch_size:]
 
-            fake_out = self.netD(fake_B)#.detach())
+            fake_out = self.netD(fake_B)  # .detach())
             real_out = self.netD(real_B)
 
             lossD = (self.criterion_gan(fake_out, False)
@@ -117,7 +121,7 @@ class TrainModel:
 
             nce_loss_tot = (nce_loss_A + nce_loss_B) * 0.5
             lossG = lossG + nce_loss_tot
-        
+
         set_grads(autograd.grad(self.scaler.scale(lossG), self.GF_params), self.GF_params)
         # self.scaler.scale(lossG).backward()
 
@@ -151,7 +155,7 @@ class TrainModel:
                             wandb.log(info)
                             if not step % args.img_log_interval:
                                 log_imgs_wandb(real_A=real_A, fake_B=fake_B, real_B=real_B, idt_B=idt_B)
-                
+
         for schd in self.schedulers:
             schd.step()
         return info

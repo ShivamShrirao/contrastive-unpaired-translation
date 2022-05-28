@@ -1,4 +1,4 @@
-python3 -m torch.distributed.run \
+torchrun \
     --standalone \
     --nnodes=1 \
     --nproc_per_node=1 \

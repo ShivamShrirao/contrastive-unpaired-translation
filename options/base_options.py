@@ -25,9 +25,9 @@ class BaseOptions():
     def initialize(self, parser):
         """Define the common options that are used in both training and test."""
         # basic parameters
-        parser.add_argument('--dataroot', default='placeholder', help='path to images (should have subfolders trainA, trainB, valA, valB, etc)')
-        parser.add_argument('--name', type=str, default='exeriment_name', help='name of the experiment. It decides where to store samples and models')
-        parser.add_argument('--checkpoints_dir', type=str, default='./checkpoints', help='models are saved here')
+        parser.add_argument('--dataroot', default=os.environ['SM_CHANNEL_TRAIN'], help='path to images (should have subfolders train_A, train_B, etc)')
+        parser.add_argument('--name', type=str, default='new_cut', help='name of the experiment. It decides where to store samples and models')
+        parser.add_argument('--checkpoints_dir', type=str, default=os.environ['SM_MODEL_DIR'], help='models are saved here')
         # model parameters
         parser.add_argument('--input_nc', type=int, default=3, help='# of input image channels: 3 for RGB and 1 for grayscale')
         parser.add_argument('--output_nc', type=int, default=3, help='# of output image channels: 3 for RGB and 1 for grayscale')
@@ -153,12 +153,12 @@ class BaseOptions():
         opt.isTrain = self.isTrain   # train or test
 
         self.print_options(opt)
-        
+
         try:
             opt.local_rank = int(os.environ["LOCAL_RANK"])
         except KeyError:
             opt.local_rank = 0
-        
+
         if opt.use_wandb:
             if opt.local_rank == 0:
                 if opt.resume:
@@ -167,7 +167,7 @@ class BaseOptions():
                         epoch = run.summary['epoch']
                     except KeyError:
                         epoch = 0
-                    wandb.config.update(dict(init_epoch=epoch+1, resume=opt.resume, epochs=opt.n_epochs,
+                    wandb.config.update(dict(init_epoch=epoch + 1, resume=opt.resume, epochs=opt.n_epochs,
                                         img_log_interval=opt.img_log_interval), allow_val_change=True)
                     # To resume in distributed training
                     os.makedirs(osp.join('wandb', opt.resume), exist_ok=True)

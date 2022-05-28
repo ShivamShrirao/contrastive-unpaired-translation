@@ -16,8 +16,8 @@ class UnAlignedDataset(data.Dataset):
         super().__init__()
         self.img_size = img_size
         self.dataset_dir = dataset_dir
-        self.A_names = sorted(os.listdir(os.path.join(self.dataset_dir, f"{phase}A")))
-        self.B_names = sorted(os.listdir(os.path.join(self.dataset_dir, f"{phase}B")))
+        self.A_names = sorted(os.listdir(os.path.join(self.dataset_dir, f"{phase}_A")))
+        self.B_names = sorted(os.listdir(os.path.join(self.dataset_dir, f"{phase}_B")))
         self.back_paths = glob(os.path.join(self.dataset_dir, "background", '*'))
         self.phase = phase
 
@@ -58,12 +58,12 @@ class UnAlignedDataset(data.Dataset):
         A = cv2.imread(os.path.join(self.dataset_dir, f"{self.phase}A", A_path))
         B_path = self.B_names[random.randint(0, len(self.B_names) - 1)]
         B = cv2.imread(os.path.join(self.dataset_dir, f"{self.phase}B", B_path))
-        A = cv2.cvtColor(A, cv2.COLOR_BGR2RGB)
-        B = cv2.cvtColor(B, cv2.COLOR_BGR2RGB)
+        A = cv2.cvtColor(A, cv2.COLOR_BGR2RGB)[...,:3]
+        B = cv2.cvtColor(B, cv2.COLOR_BGR2RGB)[...,:3]
         data = self.aug_transform(image=A, image0=B)
         A, B = data['image'], data['image0']
-        if random.uniform(0,1) < 0.3:
-            A = self.overlay_refl(A)
+        # if random.uniform(0,1) < 0.2:
+        #     A = self.overlay_refl(A)
         return A, B
 
     def __len__(self):
