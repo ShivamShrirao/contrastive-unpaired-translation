@@ -153,8 +153,8 @@ class Unet(nn.Module):
         self.down = self.get_block(ngf, 64, num=1, **kwargs)
         self.down0 = self.get_block(64, 96, num=1, **kwargs)
         self.down1 = self.get_block(96, 128, num=1, **kwargs)
-        self.down2 = self.get_block(128, 256, num=1, self_attn=self_attn, **kwargs)
-        self.down3 = self.get_block(256, 512, num=1, **kwargs)
+        self.down2 = self.get_block(128, 256, num=1, **kwargs)
+        self.down3 = self.get_block(256, 512, num=1, self_attn=self_attn, **kwargs)
 
         self.middle_conv = nn.Sequential()  # ConvNorm(512, 1024, spectral=spectral, norm_lyr=norm_lyr,
         #                                           act_cls=nn.ReLU),
@@ -172,21 +172,21 @@ class Unet(nn.Module):
         self.deep_convs = nn.ModuleList([nn.Conv2d(n_up[i], out_c, kernel_size=3 if i == 0 else 1,
                                                    padding='same') for i in range(num_scale)])
 
-    def forward(self, x, get_feat=False, encode_only=False):  # 3, 768
-        x = self.conv_in(x)        # 32, 768
-        d = self.down(x)           # 64, 384
-        d0 = self.down0(d)          # 96, 192
-        d1 = self.down1(d0)         # 128, 96
-        d2 = self.down2(d1)         # 256, 48
-        d3 = self.down3(d2)         # 512, 24
+    def forward(self, x, get_feat=False, encode_only=False):  # 3, 1024
+        x = self.conv_in(x)        # 32, 1024
+        d = self.down(x)           # 64, 512
+        d0 = self.down0(d)          # 96, 256
+        d1 = self.down1(d0)         # 128, 128
+        d2 = self.down2(d1)         # 256, 64
+        d3 = self.down3(d2)         # 512, 32
 
-        u3 = self.middle_conv(d3)   # 512, 24
+        u3 = self.middle_conv(d3)   # 512, 32
 
-        u2 = self.up3(u3, d2)       # 256, 48
-        u1 = self.up2(u2, d1)       # 128, 96
-        u0 = self.up1(u1, d0)       # 96, 192
-        u = self.up0(u0, d)        # 64, 384
-        o = self.up(u, x)        # 32, 768
+        u2 = self.up3(u3, d2)       # 256, 64
+        u1 = self.up2(u2, d1)       # 128, 128
+        u0 = self.up1(u1, d0)       # 96, 256
+        u = self.up0(u0, d)        # 64, 512
+        o = self.up(u, x)        # 32, 1024
         if get_feat:
             feats = x, d0, d1, d2, d3
             if encode_only:

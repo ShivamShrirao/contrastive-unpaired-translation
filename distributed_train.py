@@ -28,9 +28,9 @@ class TrainModel:
     def __init__(self, args):
         self.device = torch.device('cuda', args.local_rank)
         self.img_size = (1024, 1024)
-        m = timm.create_model(args.encoder, pretrained=True, exportable=True, features_only=True).to(self.device)
-        self.netG = DynamicUnet(m, 3, 3, self_attn=True, spectral=True, norm_lyr=nn.InstanceNorm2d).to(self.device).train()
-        # self.netG = Unet(args.input_nc, args.output_nc, args.ngf, self_attn=True).to(self.device)
+        # m = timm.create_model(args.encoder, pretrained=True, exportable=True, features_only=True).to(self.device)
+        # self.netG = DynamicUnet(m, 3, 3, self_attn=True, spectral=True, norm_lyr=nn.InstanceNorm2d).to(self.device).train()
+        self.netG = Unet(args.input_nc, args.output_nc, args.ngf, self_attn=True).to(self.device)
         # init_weights(self.netG, args.init_type, args.init_gain)
         norm_layer = get_norm_layer(args.normD)
         self.netD = NLayerDiscriminator(args.output_nc, args.ndf, args.n_layers_D, norm_layer).to(self.device)

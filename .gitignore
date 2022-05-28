@@ -1,3 +1,6 @@
+checkpoints*
+*.pt
+secrets.env
 *.xml
 *.json
 .ipynb_checkpoints/
@@ -6,7 +9,6 @@ node_modules/
 .DS_Store
 debug*
 datasets/
-checkpoints/
 results/
 build/
 dist/
