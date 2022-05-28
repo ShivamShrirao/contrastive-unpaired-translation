@@ -29,7 +29,7 @@ class TrainOptions(BaseOptions):
         parser.add_argument('--resume', type=str, default=None, help="ID of wandb run to resume.")
         parser.add_argument('--init_epoch', type=int, default=1, metavar="N", help="Initial epoch.")
         parser.add_argument('--log_interval', type=int, default=20, metavar="N", help="Log per N steps.")
-        parser.add_argument('--img_log_interval', type=int, default=300, metavar="N", help="Log images per N steps.")
+        parser.add_argument('--img_log_interval', type=int, default=500, metavar="N", help="Log images per N steps.")
 
         self.isTrain = True
         return parser

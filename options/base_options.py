@@ -29,6 +29,7 @@ class BaseOptions():
         parser.add_argument('--name', type=str, default='new_cut', help='name of the experiment. It decides where to store samples and models')
         parser.add_argument('--checkpoints_dir', type=str, default='checkpoints/' or os.environ['SM_MODEL_DIR'], help='models are saved here')
         # model parameters
+        parser.add_argument('--encoder', type=str, default='seresnet18', help="Name encoder backbone to use.")      # 'resnetblur18'
         parser.add_argument('--input_nc', type=int, default=3, help='# of input image channels: 3 for RGB and 1 for grayscale')
         parser.add_argument('--output_nc', type=int, default=3, help='# of output image channels: 3 for RGB and 1 for grayscale')
         parser.add_argument('--ngf', type=int, default=64, help='# of gen filters in the last conv layer')
