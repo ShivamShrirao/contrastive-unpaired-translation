@@ -179,7 +179,7 @@ class BaseOptions():
                         json.dump(sh_arg, fp)
                 else:
                     run = wandb.init(project=opt.project)
-                    wandb.config.update(opt)
+                    wandb.config.update(opt, allow_val_change=True)
                 opt = wandb.config
             elif opt.resume:
                 # To resume in distributed training
