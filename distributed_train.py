@@ -59,7 +59,7 @@ class TrainModel:
         self.criterion_gan = GANLoss()
         self.criterionNCE = [PatchNCELoss(args).to(self.device) for _ in range(len(feats))]
         self.loss_names = ['lossG', 'lossD', 'nce_loss_tot']
-        dataset = UnAlignedDataset(args.dataroot, *self.img_size, args.phase)
+        dataset = UnAlignedDataset(args.dataroot, self.img_size, args.phase)
         self.dataloader = CreateDataLoader(dataset, args.batch_size, workers=args.workers)
         # if args.local_rank == 0:
         #     val_dataset = UnAlignedDataset(args.dataroot, 1024, phase="test")
