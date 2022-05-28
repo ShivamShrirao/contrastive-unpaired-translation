@@ -28,7 +28,7 @@ class TrainModel:
     def __init__(self, args):
         self.device = torch.device('cuda', args.local_rank)
         self.img_size = (1024, 1024)
-        m = timm.create_model('seresnet34', pretrained=True, exportable=True, features_only=True).to(self.device)
+        m = timm.create_model('seresnet18', pretrained=True, exportable=True, features_only=True).to(self.device)
         self.netG = DynamicUnet(m, 3, 3, self_attn=True, spectral=True, norm_lyr=nn.InstanceNorm2d).to(self.device).train()
         # self.netG = Unet(args.input_nc, args.output_nc, 32, self_attn=False).to(self.device)
         # init_weights(self.netG, args.init_type, args.init_gain)

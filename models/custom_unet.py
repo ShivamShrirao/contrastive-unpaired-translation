@@ -140,7 +140,6 @@ class DynamicUnet(nn.Module):
         x = self.last_cross(x)
         x = self.conv_out(x)
         if get_feat:
-            feats = [inp] + feats
             if encode_only:
                 return feats
             else:
