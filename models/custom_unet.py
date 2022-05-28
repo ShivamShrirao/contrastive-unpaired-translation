@@ -130,16 +130,21 @@ class DynamicUnet(nn.Module):
         self.last_cross = ResBlock(ni, ni, act_cls=act_cls, norm_lyr=norm_lyr)
         self.conv_out = ConvNorm(ni, n_out, ks=1, act_cls=None, bn=False)
 
-    def forward(self, inp):
+    def forward(self, inp, get_feat=False, encode_only=False):
         feats = self.encoder(inp)
         x = self.mid(feats[-1])
-        feats = feats[:-1]
-        for ft, lyr in zip(feats[::-1], self.unet_blocks):
+        for ft, lyr in zip(feats[:-1][::-1], self.unet_blocks):
             x = lyr(x, ft)
         x = self.pix_up(x)
         x = torch.cat([x, inp], dim=1)
         x = self.last_cross(x)
         x = self.conv_out(x)
+        if get_feat:
+            feats = [inp] + feats
+            if encode_only:
+                return feats
+            else:
+                return torch.tanh(x), feats
         return torch.tanh(x)
 
 

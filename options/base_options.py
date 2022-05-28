@@ -25,9 +25,9 @@ class BaseOptions():
     def initialize(self, parser):
         """Define the common options that are used in both training and test."""
         # basic parameters
-        parser.add_argument('--dataroot', default=os.environ['SM_CHANNEL_TRAIN'], help='path to images (should have subfolders train_A, train_B, etc)')
+        parser.add_argument('--dataroot', default='dataset/' or os.environ['SM_CHANNEL_TRAIN'], help='path to images (should have subfolders train_A, train_B, etc)')
         parser.add_argument('--name', type=str, default='new_cut', help='name of the experiment. It decides where to store samples and models')
-        parser.add_argument('--checkpoints_dir', type=str, default=os.environ['SM_MODEL_DIR'], help='models are saved here')
+        parser.add_argument('--checkpoints_dir', type=str, default='checkpoints/' or os.environ['SM_MODEL_DIR'], help='models are saved here')
         # model parameters
         parser.add_argument('--input_nc', type=int, default=3, help='# of input image channels: 3 for RGB and 1 for grayscale')
         parser.add_argument('--output_nc', type=int, default=3, help='# of output image channels: 3 for RGB and 1 for grayscale')
