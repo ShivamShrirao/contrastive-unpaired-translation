@@ -55,9 +55,9 @@ class UnAlignedDataset(data.Dataset):
 
     def __getitem__(self, index):
         A_path = self.A_names[index]
-        A = cv2.imread(os.path.join(self.dataset_dir, f"{self.phase}A", A_path))
+        A = cv2.imread(os.path.join(self.dataset_dir, f"{self.phase}_A", A_path))
         B_path = self.B_names[random.randint(0, len(self.B_names) - 1)]
-        B = cv2.imread(os.path.join(self.dataset_dir, f"{self.phase}B", B_path))
+        B = cv2.imread(os.path.join(self.dataset_dir, f"{self.phase}_B", B_path))
         A = cv2.cvtColor(A, cv2.COLOR_BGR2RGB)[...,:3]
         B = cv2.cvtColor(B, cv2.COLOR_BGR2RGB)[...,:3]
         data = self.aug_transform(image=A, image0=B)
