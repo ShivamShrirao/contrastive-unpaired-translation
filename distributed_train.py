@@ -21,16 +21,16 @@ from options.train_options import TrainOptions
 from utils import AverageMeter, reduce_loss, synchronize, cleanup, seed_everything, set_grads, log_imgs_wandb
 from data import CreateDataLoader
 from data.unaligned_dataset import UnAlignedDataset
-from models.custom_unet import NLayerDiscriminator, PatchSampleF, GANLoss, PatchNCELoss, get_norm_layer, DynamicUnet
+from models.custom_unet import NLayerDiscriminator, PatchSampleF, GANLoss, PatchNCELoss, get_norm_layer, DynamicUnet, Unet
 
 
 class TrainModel:
     def __init__(self, args):
         self.device = torch.device('cuda', args.local_rank)
         self.img_size = (1024, 1024)
-        m = timm.create_model('seresnet18', pretrained=True, exportable=True, features_only=True).to(self.device)
+        m = timm.create_model('resnetblur18', pretrained=True, exportable=True, features_only=True).to(self.device)
         self.netG = DynamicUnet(m, 3, 3, self_attn=True, spectral=True, norm_lyr=nn.InstanceNorm2d).to(self.device).train()
-        # self.netG = Unet(args.input_nc, args.output_nc, 32, self_attn=False).to(self.device)
+        # self.netG = Unet(args.input_nc, args.output_nc, args.ngf, self_attn=True).to(self.device)
         # init_weights(self.netG, args.init_type, args.init_gain)
         norm_layer = get_norm_layer(args.normD)
         self.netD = NLayerDiscriminator(args.output_nc, args.ndf, args.n_layers_D, norm_layer).to(self.device)
@@ -122,9 +122,8 @@ class TrainModel:
             nce_loss_tot = (nce_loss_A + nce_loss_B) * 0.5
             lossG = lossG + nce_loss_tot
 
-        set_grads(autograd.grad(self.scaler.scale(lossG), self.GF_params), self.GF_params)
         # self.scaler.scale(lossG).backward()
-
+        set_grads(autograd.grad(self.scaler.scale(lossG), self.GF_params), self.GF_params)
         self.scaler.step(self.optG)
         self.optG.zero_grad(set_to_none=True)
         self.scaler.step(self.optF)
