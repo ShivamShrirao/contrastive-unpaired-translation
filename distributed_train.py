@@ -1,8 +1,8 @@
 import os
-from os.path import join as osp
+import os.path as osp
 import numpy as np
 from tqdm import tqdm
-
+import json
 import wandb
 
 import timm
@@ -21,16 +21,17 @@ from options.train_options import TrainOptions
 from utils import AverageMeter, reduce_loss, synchronize, cleanup, seed_everything, set_grads, log_imgs_wandb
 from data import CreateDataLoader
 from data.unaligned_dataset import UnAlignedDataset
-from models.custom_unet import NLayerDiscriminator, PatchSampleF, GANLoss, PatchNCELoss, get_norm_layer, DynamicUnet, Unet
+from models.custom_unet import NLayerDiscriminator, PatchSampleF, GANLoss, PatchNCELoss, get_norm_layer, DynamicUnet, Unet, ResnetGenerator
 
 
 class TrainModel:
     def __init__(self, args):
         self.device = torch.device('cuda', args.local_rank)
-        self.img_size = (1024, 1024)
+        self.img_size = (256, 512)
         # m = timm.create_model(args.encoder, pretrained=True, exportable=True, features_only=True).to(self.device)
         # self.netG = DynamicUnet(m, 3, 3, self_attn=True, spectral=True, norm_lyr=nn.InstanceNorm2d).to(self.device).train()
-        self.netG = Unet(args.input_nc, args.output_nc, args.ngf, self_attn=True).to(self.device)
+        # self.netG = Unet(args.input_nc, args.output_nc, args.ngf, self_attn=True).to(self.device)
+        self.netG = ResnetGenerator(args.input_nc, args.output_nc).to(self.device)
         # init_weights(self.netG, args.init_type, args.init_gain)
         norm_layer = get_norm_layer(args.normD)
         self.netD = NLayerDiscriminator(args.output_nc, args.ndf, args.n_layers_D, norm_layer).to(self.device)
@@ -168,37 +169,41 @@ class TrainModel:
             self.dataloader.sampler.set_epoch(epoch)
             info = self.train_epoch(args, epoch)
             info['epoch'] = epoch
+            info['args'] = dict(args)
             if args.local_rank == 0:
                 if args.use_wandb:
+                    info['run_id'] = wandb.run.id
                     wandb.log({'epoch': epoch})
-            self.save_models(args, 'latest', info)
-            if not epoch % 1:
-                self.save_models(args, epoch, info)
-                # self.validate(args)
+                self.save_models(args, 'latest', info)
+                if not epoch % 1:
+                    self.save_models(args, epoch, info)
+                    # self.validate(args)
 
     def save_models(self, args, epoch='latest', info={}):
         if args.local_rank == 0:
-            os.makedirs(osp(args.checkpoints_dir, args.name), exist_ok=True)
-            torch.save(self.netG.state_dict(), osp(args.checkpoints_dir, args.name, f"{epoch}_netG.pth"))
-            torch.save(self.netD.state_dict(), osp(args.checkpoints_dir, args.name, f"{epoch}_netD.pth"))
-            torch.save(self.netF.state_dict(), osp(args.checkpoints_dir, args.name, f"{epoch}_netF.pth"))
-            # torch.save(self.optG.state_dict(), osp(args.checkpoints_dir, args.name, f"{epoch}_optG.pth"))
-            # torch.save(self.optD.state_dict(), osp(args.checkpoints_dir, args.name, f"{epoch}_optD.pth"))
-            # torch.save(self.optF.state_dict(), osp(args.checkpoints_dir, args.name, f"{epoch}_optF.pth"))
-            torch.save(info, osp(args.checkpoints_dir, args.name, f"{epoch}_info.pth"))
+            os.makedirs(osp.join(args.checkpoints_dir, args.name), exist_ok=True)
+            torch.save(self.netG.state_dict(), osp.join(args.checkpoints_dir, args.name, f"{epoch}_netG.pth"))
+            torch.save(self.netD.state_dict(), osp.join(args.checkpoints_dir, args.name, f"{epoch}_netD.pth"))
+            torch.save(self.netF.state_dict(), osp.join(args.checkpoints_dir, args.name, f"{epoch}_netF.pth"))
+            # torch.save(self.optG.state_dict(), osp.join(args.checkpoints_dir, args.name, f"{epoch}_optG.pth"))
+            # torch.save(self.optD.state_dict(), osp.join(args.checkpoints_dir, args.name, f"{epoch}_optD.pth"))
+            # torch.save(self.optF.state_dict(), osp.join(args.checkpoints_dir, args.name, f"{epoch}_optF.pth"))
+            if info:
+                with open(osp.join(args.checkpoints_dir, args.name, f"{epoch}_info.json"), "w") as f:
+                    json.dump(info, f, indent=4)
             print("[+] Weights saved.")
 
     def load_models(self, args, epoch='latest'):
         synchronize()
         map_location = {'cuda:0': f'cuda:{args.local_rank}'}
         try:
-            self.netG.load_state_dict(torch.load(osp(args.checkpoints_dir, args.name, f"{epoch}_netG.pth"), map_location=map_location))
+            self.netG.load_state_dict(torch.load(osp.join(args.checkpoints_dir, args.name, f"{epoch}_netG.pth"), map_location=map_location))
             if args.phase == 'train':
-                self.netD.load_state_dict(torch.load(osp(args.checkpoints_dir, args.name, f"{epoch}_netD.pth"), map_location=map_location))
-                self.netF.load_state_dict(torch.load(osp(args.checkpoints_dir, args.name, f"{epoch}_netF.pth"), map_location=map_location))
-                # self.optG.load_state_dict(torch.load(osp(args.checkpoints_dir, args.name, f"{epoch}_optG.pth"), map_location=map_location))
-                # self.optD.load_state_dict(torch.load(osp(args.checkpoints_dir, args.name, f"{epoch}_optD.pth"), map_location=map_location))
-                # self.optF.load_state_dict(torch.load(osp(args.checkpoints_dir, args.name, f"{epoch}_optF.pth"), map_location=map_location))
+                self.netD.load_state_dict(torch.load(osp.join(args.checkpoints_dir, args.name, f"{epoch}_netD.pth"), map_location=map_location))
+                self.netF.load_state_dict(torch.load(osp.join(args.checkpoints_dir, args.name, f"{epoch}_netF.pth"), map_location=map_location))
+                # self.optG.load_state_dict(torch.load(osp.join(args.checkpoints_dir, args.name, f"{epoch}_optG.pth"), map_location=map_location))
+                # self.optD.load_state_dict(torch.load(osp.join(args.checkpoints_dir, args.name, f"{epoch}_optD.pth"), map_location=map_location))
+                # self.optF.load_state_dict(torch.load(osp.join(args.checkpoints_dir, args.name, f"{epoch}_optF.pth"), map_location=map_location))
             if args.local_rank == 0:
                 print(f"[+] Weights loaded for {epoch} epoch.")
         except FileNotFoundError as e:

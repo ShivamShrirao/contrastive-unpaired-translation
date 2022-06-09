@@ -26,13 +26,17 @@ class BaseOptions():
         """Define the common options that are used in both training and test."""
         # basic parameters
         parser.add_argument('--name', type=str, default='new_cut', help='name of the experiment. It decides where to store samples and models')
-        parser.add_argument('--dataroot', default=os.environ['SM_CHANNEL_TRAIN'] or 'dataset/', help='path to images (should have subfolders train_A, train_B, etc)')
-        parser.add_argument('--checkpoints_dir', type=str, default=os.environ['SM_MODEL_DIR'] or 'checkpoints/', help='models are saved here')
+        try:
+            dataroot = os.environ['SM_CHANNEL_TRAIN']
+        except KeyError:
+            dataroot = 'dataset/'
+        parser.add_argument('--dataroot', default=dataroot, help='path to images (should have subfolders train_A, train_B, etc)')
+        parser.add_argument('--checkpoints_dir', type=str, default="/opt/ml/checkpoints/", help='models are saved here')
         # model parameters
         parser.add_argument('--encoder', type=str, default='seresnet18', help="Name encoder backbone to use.")      # 'resnetblur18'
         parser.add_argument('--input_nc', type=int, default=3, help='# of input image channels: 3 for RGB and 1 for grayscale')
         parser.add_argument('--output_nc', type=int, default=3, help='# of output image channels: 3 for RGB and 1 for grayscale')
-        parser.add_argument('--ngf', type=int, default=64, help='# of gen filters in the last conv layer')
+        parser.add_argument('--ngf', type=int, default=32, help='# of gen filters in the last conv layer')
         parser.add_argument('--ndf', type=int, default=64, help='# of discrim filters in the first conv layer')
         parser.add_argument('--n_layers_D', type=int, default=3, help='only used if netD==n_layers')
         parser.add_argument('--normG', type=str, default='instance', choices=['instance', 'batch', 'none'], help='instance normalization or batch normalization for G')
@@ -154,40 +158,27 @@ class BaseOptions():
         opt.isTrain = self.isTrain   # train or test
 
         self.print_options(opt)
-
         try:
             opt.local_rank = int(os.environ["LOCAL_RANK"])
         except KeyError:
             opt.local_rank = 0
 
-        if opt.use_wandb:
-            if opt.local_rank == 0:
-                if opt.resume:
-                    run = wandb.init(id=opt.resume, project=opt.project, resume='must')
-                    try:
-                        epoch = run.summary['epoch']
-                    except KeyError:
-                        epoch = 0
-                    wandb.config.update(dict(init_epoch=epoch + 1, resume=opt.resume, epochs=opt.n_epochs,
-                                        img_log_interval=opt.img_log_interval), allow_val_change=True)
-                    # To resume in distributed training
-                    os.makedirs(osp.join('wandb', opt.resume), exist_ok=True)
-                    outf = osp.join('wandb', opt.resume, 'config.json')
-                    with open(outf, 'w') as fp:
-                        sh_arg = vars(wandb.config)["_items"].copy()
-                        del sh_arg['local_rank']
-                        json.dump(sh_arg, fp)
-                else:
-                    run = wandb.init(project=opt.project)
-                    wandb.config.update(opt, allow_val_change=True)
-                opt = wandb.config
-            elif opt.resume:
-                # To resume in distributed training
-                outf = osp.join('wandb', opt.resume, 'config.json')
-                while not osp.exists(outf):
-                    time.sleep(0.1)
-                with open(outf, 'r') as fp:
-                    vars(opt).update(json.load(fp))
+        info_pth = osp.join(opt.checkpoints_dir, opt.name, f"latest_info.json")
+        if osp.exists(info_pth):
+            with open(info_pth, 'r') as fp:
+                info = json.load(fp)
+            updict = dict(init_epoch=info['epoch'] + 1, local_rank=opt.local_rank)
+            vars(opt).update(info['args'])
+            vars(opt).update(updict)
+            if opt.use_wandb:
+                if opt.local_rank == 0:
+                    wandb.init(id=info['run_id'], project=opt.project, resume='must')
+                    wandb.config.update(updict, allow_val_change=True)
+                    opt = wandb.config
+                    
+        elif opt.use_wandb:
+            run = wandb.init(project=opt.project, config=opt)
+            opt = wandb.config
 
         self.opt = opt
         return self.opt
