@@ -62,8 +62,8 @@ class UnAlignedDataset(data.Dataset):
         A = cv2.cvtColor(A, cv2.COLOR_BGR2RGB)[...,:3]
         B = cv2.cvtColor(B, cv2.COLOR_BGR2RGB)[...,:3]
 
-        A = cv2.cvtColor(cv2.cvtColor(A, cv2.COLOR_RGB2GRAY), cv2.COLOR_GRAY2RGB)
-        B = cv2.cvtColor(cv2.cvtColor(B, cv2.COLOR_RGB2GRAY), cv2.COLOR_GRAY2RGB)
+        # A = cv2.cvtColor(cv2.cvtColor(A, cv2.COLOR_RGB2GRAY), cv2.COLOR_GRAY2RGB)
+        # B = cv2.cvtColor(cv2.cvtColor(B, cv2.COLOR_RGB2GRAY), cv2.COLOR_GRAY2RGB)
 
         data = self.aug_transform(image=A, image0=B)
         A, B = data['image'], data['image0']

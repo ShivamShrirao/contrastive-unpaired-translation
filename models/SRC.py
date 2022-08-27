@@ -28,7 +28,7 @@ class SRC_Loss(nn.Module):
 
         dim = feat_q.shape[1]
         feat_k = feat_k.detach()
-        batch_dim_for_bmm = 1   # self.opt.batch_size
+        batch_dim_for_bmm = self.opt.batch_size
         feat_k = Normalize()(feat_k)
         feat_q = Normalize()(feat_q)
 

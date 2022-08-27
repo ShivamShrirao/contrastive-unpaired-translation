@@ -97,7 +97,7 @@ class TrainModel:
         feat_k_pool, sample_ids = self.netF(feat_k, args.num_patches, None)
         feat_q_pool, _ = self.netF(feat_q, args.num_patches, sample_ids)
 
-        loss_SRC, weight = self.calculate_R_loss(feat_k_pool, feat_q_pool, n_layers=len(feat_k), epoch=self.train_epoch)
+        loss_SRC, weight = self.calculate_R_loss(args, feat_k_pool, feat_q_pool, n_layers=len(feat_k), epoch=self.epoch_count)
 
         total_hdce_loss = 0.0
         for f_q, f_k, crit, w in zip(feat_q_pool, feat_k_pool, self.criterionHDCE, weight):
@@ -105,12 +105,12 @@ class TrainModel:
 
         return total_hdce_loss / len(feat_k) , loss_SRC
     
-    def calculate_R_loss(self, feat_k_pool, feat_q_pool, n_layers, only_weight=False, epoch=None):
+    def calculate_R_loss(self, args, feat_k_pool, feat_q_pool, n_layers, only_weight=False, epoch=None):
         total_SRC_loss = 0.0
         weights=[]
         for f_q, f_k, crit in zip(feat_q_pool, feat_k_pool, self.criterionR):
             loss_SRC, weight = crit(f_q, f_k, only_weight, epoch)
-            total_SRC_loss += loss_SRC * self.opt.lambda_SRC
+            total_SRC_loss += loss_SRC * args.lambda_SRC
             weights.append(weight)
         return total_SRC_loss / n_layers, weights
 
@@ -195,7 +195,7 @@ class TrainModel:
             self.netD.train()
             self.netF.train()
             self.dataloader.sampler.set_epoch(epoch)
-            self.train_epoch = epoch
+            self.epoch_count = epoch
             info = self.train_epoch(args, epoch)
             info['epoch'] = epoch
             info['args'] = dict(args)
