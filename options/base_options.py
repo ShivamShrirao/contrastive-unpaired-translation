@@ -1,4 +1,5 @@
 import argparse
+from email.policy import default
 import os
 from utils import str2bool, mkdirs
 import torch
@@ -47,6 +48,9 @@ class BaseOptions():
                             help='no dropout for the generator')
         parser.add_argument('--no_antialias', action='store_true', help='if specified, use stride=2 convs instead of antialiased-downsampling (sad)')
         parser.add_argument('--no_antialias_up', action='store_true', help='if specified, use [upconv(learned filter)] instead of [upconv(hard-coded [1,3,3,1] filter), conv]')
+        parser.add_argument('--DiffAugment', type=bool, default=False, help="Use GAN and dis. DiffAugment on tarning.")
+        parser.add_argument('--DiffAugment_policy', type=str, default='color,translation,cutout', help="Use GAN and dis. DiffAugment on tarning policy ['color,translation,cutout']")
+
         # dataset parameters
         parser.add_argument('--batch_size', type=int, default=1, help='input batch size')
         parser.add_argument('--workers', type=int, default=8, metavar="N", help="Number of workers for dataloader.")
@@ -56,6 +60,13 @@ class BaseOptions():
 
         parser.add_argument('--lambda_GAN', type=float, default=1.0, help='weight for GAN loss：GAN(G(X))')
         parser.add_argument('--lambda_NCE', type=float, default=1.0, help='weight for NCE loss: NCE(G(X), X)')
+        parser.add_argument('--lambda_HDCE', type=float, default=0.1, help='weight for HDCE loss: HDCE(G(X), X)')
+        parser.add_argument('--lambda_SRC', type=float, default=0.1, help='weight for SRC loss: SRC(G(X), X)')
+        parser.add_argument('--use_curriculum', type=bool, default=True)
+        parser.add_argument('--HDCE_gamma', type=float, default=50)
+        parser.add_argument('--HDCE_gamma_min', type=float, default=10)
+        parser.add_argument('--step_gamma', type=bool, default=True)
+        parser.add_argument('--step_gamma_epoch', type=int, default=100)
         parser.add_argument('--nce_idt', type=str2bool, nargs='?', const=True, default=False, help='use NCE loss for identity mapping: NCE(G(Y), Y))')
         parser.add_argument('--nce_layers', type=str, default='0,4,8,12,16', help='compute NCE loss on which layers')
         parser.add_argument('--nce_includes_all_negatives_from_minibatch',

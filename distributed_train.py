@@ -22,14 +22,17 @@ from utils import AverageMeter, reduce_loss, synchronize, cleanup, seed_everythi
 from data import CreateDataLoader
 from data.unaligned_dataset import UnAlignedDataset
 from models.custom_unet import NLayerDiscriminator, PatchSampleF, GANLoss, PatchNCELoss, get_norm_layer, DynamicUnet, Unet, ResnetGenerator
+from DiffAugment_pytorch import DiffAugment
+from models.hDCE import PatchHDCELoss
+from models.SRC import SRC_Loss
 
 
 class TrainModel:
     def __init__(self, args):
         self.device = torch.device('cuda', args.local_rank)
-        self.img_size = (256, 512)
+        self.img_size = (128, 512)
         # m = timm.create_model(args.encoder, pretrained=True, exportable=True, features_only=True).to(self.device)
-        # self.netG = DynamicUnet(m, 3, 3, self_attn=True, spectral=True, norm_lyr=nn.InstanceNorm2d).to(self.device).train()
+        # self.netG = DynamicUnet(m, args.input_nc, args.output_nc, self_attn=True, spectral=True, norm_lyr=nn.InstanceNorm2d).to(self.device).train()
         # self.netG = Unet(args.input_nc, args.output_nc, args.ngf, self_attn=True).to(self.device)
         self.netG = ResnetGenerator(args.input_nc, args.output_nc).to(self.device)
         # init_weights(self.netG, args.init_type, args.init_gain)
@@ -59,6 +62,8 @@ class TrainModel:
 
         self.criterion_gan = GANLoss()
         self.criterionNCE = [PatchNCELoss(args).to(self.device) for _ in range(len(feats))]
+        self.criterionHDCE = [PatchHDCELoss(args).to(self.device) for _ in range(len(feats))]
+        self.criterionR = [SRC_Loss(args).to(self.device) for _ in range(len(feats))]
         self.loss_names = ['lossG', 'lossD', 'nce_loss_tot']
         dataset = UnAlignedDataset(args.dataroot, self.img_size, args.phase)
         self.dataloader = CreateDataLoader(dataset, args.batch_size, workers=args.workers)
@@ -67,11 +72,10 @@ class TrainModel:
         #     val_dataset.img_names = val_dataset.img_names[:20]
         #     self.val_loader = CreateDataLoader(val_dataset, 2, workers=args.workers, shuffle=False, distributed=False)
 
-        self.optG = optim.Adam(self.netG.parameters(), lr=args.lr, betas=(args.beta1, args.beta2))  # , weight_decay=args.wd)
-        self.optD = optim.Adam(self.netD.parameters(), lr=args.lr, betas=(args.beta1, args.beta2))  # , weight_decay=args.wd)
-        self.optF = optim.Adam(self.netF.parameters(), lr=args.lr, betas=(args.beta1, args.beta2))  # , weight_decay=args.wd)
+        self.optG = optim.AdamW(self.netG.parameters(), lr=args.lr, betas=(args.beta1, args.beta2), weight_decay=args.wd)
+        self.optD = optim.AdamW(self.netD.parameters(), lr=args.lr, betas=(args.beta1, args.beta2), weight_decay=args.wd)
+        self.optF = optim.AdamW(self.netF.parameters(), lr=args.lr, betas=(args.beta1, args.beta2), weight_decay=args.wd)
         self.scaler = amp.GradScaler(enabled=not args.no_amp)
-        self.GF_params = list(self.netG.parameters()) + list(self.netF.parameters())
 
         def lambda_rule(epoch):
             lr_l = 1.0 - max(0, epoch + args.init_epoch - args.n_epochs) / float(args.n_epochs_decay + 1)
@@ -88,6 +92,27 @@ class TrainModel:
             total_nce_loss += crit(f_q, f_k) * args.lambda_NCE
 
         return total_nce_loss / len(feat_k)
+    
+    def calculate_HDCE_loss(self, args, feat_k, feat_q):
+        feat_k_pool, sample_ids = self.netF(feat_k, args.num_patches, None)
+        feat_q_pool, _ = self.netF(feat_q, args.num_patches, sample_ids)
+
+        loss_SRC, weight = self.calculate_R_loss(feat_k_pool, feat_q_pool, n_layers=len(feat_k), epoch=self.train_epoch)
+
+        total_hdce_loss = 0.0
+        for f_q, f_k, crit, w in zip(feat_q_pool, feat_k_pool, self.criterionHDCE, weight):
+            total_hdce_loss += crit(f_q, f_k, w).mean() * args.lambda_HDCE
+
+        return total_hdce_loss / len(feat_k) , loss_SRC
+    
+    def calculate_R_loss(self, feat_k_pool, feat_q_pool, n_layers, only_weight=False, epoch=None):
+        total_SRC_loss = 0.0
+        weights=[]
+        for f_q, f_k, crit in zip(feat_q_pool, feat_k_pool, self.criterionR):
+            loss_SRC, weight = crit(f_q, f_k, only_weight, epoch)
+            total_SRC_loss += loss_SRC * self.opt.lambda_SRC
+            weights.append(weight)
+        return total_SRC_loss / n_layers, weights
 
 
     def forward(self, args, real_A, real_B):
@@ -98,8 +123,8 @@ class TrainModel:
             fake_B = pred[:batch_size]
             idt_B = pred[batch_size:]
 
-            fake_out = self.netD(fake_B)  # .detach())
-            real_out = self.netD(real_B)
+            fake_out = self.netD(DiffAugment(fake_B, args.DiffAugment_policy))  # .detach())
+            real_out = self.netD(DiffAugment(real_B, args.DiffAugment_policy))
 
             lossD = (self.criterion_gan(fake_out, False)
                      + self.criterion_gan(real_out, True)) * 0.5
@@ -112,19 +137,22 @@ class TrainModel:
             # fake_out = self.netD(fake_B)
             lossG = self.criterion_gan(fake_out, True) * args.lambda_GAN
 
-            feat_q = self.netG(fake_B, get_feat=True, encode_only=True)
             feat_k = [ft[:batch_size] for ft in feats]
-            nce_loss_A = self.calculate_NCE_loss(args, feat_k, feat_q)
+            feat_q = self.netG(fake_B, get_feat=True, encode_only=True)
+            # nce_loss_A = self.calculate_NCE_loss(args, feat_k, feat_q)
+            nce_loss_A, loss_SRC = self.calculate_HDCE_loss(args, feat_k, feat_q)
 
-            feat_q = self.netG(idt_B, get_feat=True, encode_only=True)
             feat_k = [ft[batch_size:] for ft in feats]
-            nce_loss_B = self.calculate_NCE_loss(args, feat_k, feat_q)
+            feat_q = self.netG(idt_B, get_feat=True, encode_only=True)
+            # nce_loss_B = self.calculate_NCE_loss(args, feat_k, feat_q)
+            nce_loss_B, _ = self.calculate_HDCE_loss(args, feat_k, feat_q)
 
             nce_loss_tot = (nce_loss_A + nce_loss_B) * 0.5
-            lossG = lossG + nce_loss_tot
+            lossG = lossG + nce_loss_tot + loss_SRC
 
         # self.scaler.scale(lossG).backward()
-        set_grads(autograd.grad(self.scaler.scale(lossG), self.GF_params), self.GF_params)
+        GF_params = list(self.netG.parameters()) + list(self.netF.parameters())
+        set_grads(autograd.grad(self.scaler.scale(lossG), GF_params), GF_params)
         self.scaler.step(self.optG)
         self.optG.zero_grad(set_to_none=True)
         self.scaler.step(self.optF)
@@ -167,6 +195,7 @@ class TrainModel:
             self.netD.train()
             self.netF.train()
             self.dataloader.sampler.set_epoch(epoch)
+            self.train_epoch = epoch
             info = self.train_epoch(args, epoch)
             info['epoch'] = epoch
             info['args'] = dict(args)

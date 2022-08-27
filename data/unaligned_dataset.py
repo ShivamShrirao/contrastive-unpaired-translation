@@ -23,6 +23,7 @@ class UnAlignedDataset(data.Dataset):
 
         self.aug_transform = A.Compose([
             A.HorizontalFlip(),
+            A.Affine(scale=(0.8, 1.2), translate_percent=(-0.1, 0.1), rotate=(-10, 10), shear=(-10, 10), mode=cv2.BORDER_REPLICATE, p=0.7),
             A.Resize(*self.img_size),
             A.Normalize(mean=(0.5, 0.5, 0.5), std=(0.5, 0.5, 0.5)),
             ToTensorV2(),
@@ -60,6 +61,10 @@ class UnAlignedDataset(data.Dataset):
         B = cv2.imread(os.path.join(self.dataset_dir, f"{self.phase}_B", B_path))
         A = cv2.cvtColor(A, cv2.COLOR_BGR2RGB)[...,:3]
         B = cv2.cvtColor(B, cv2.COLOR_BGR2RGB)[...,:3]
+
+        A = cv2.cvtColor(cv2.cvtColor(A, cv2.COLOR_RGB2GRAY), cv2.COLOR_GRAY2RGB)
+        B = cv2.cvtColor(cv2.cvtColor(B, cv2.COLOR_RGB2GRAY), cv2.COLOR_GRAY2RGB)
+
         data = self.aug_transform(image=A, image0=B)
         A, B = data['image'], data['image0']
         # if random.uniform(0,1) < 0.2:
