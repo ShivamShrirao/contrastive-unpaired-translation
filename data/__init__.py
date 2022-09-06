@@ -9,6 +9,6 @@ def CreateDataLoader(dataset, batch_size, workers=8, shuffle=True, distributed=T
 
     dataloader = data.DataLoader(
         dataset, batch_size=batch_size, shuffle=(train_sampler is None) and shuffle,
-        num_workers=workers, pin_memory=True, drop_last=False, sampler=train_sampler
+        num_workers=workers, pin_memory=True, drop_last=True, sampler=train_sampler
     )
     return dataloader
