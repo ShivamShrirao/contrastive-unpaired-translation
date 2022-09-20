@@ -58,7 +58,7 @@ class UnAlignedDataset(data.Dataset):
         img = img[:,:,:3]
         back_arr = np.clip(back_arr, 50, 255)
         back_arr = back_arr * mask
-        alpha = np.clip(random.uniform(0., 1.2), 0, 1)
+        alpha = np.clip(random.uniform(0., 1.1), 0, 1)
         out_img = img*(1-alpha) + back_arr*alpha
         return out_img
 
@@ -79,7 +79,9 @@ class UnAlignedDataset(data.Dataset):
         B = aug['image0']
         A = self.aug_transform(image=A)['image']
         B = self.aug_transform(image=B)['image']
-        if random.uniform(0,1) < 0.8:
+        if random.uniform(0,1) < 0.7:
+            if random.uniform(0,1) < 0.1:
+                A = B
             A = self.overlay_refl(A)
         A = A[:,:,:3]
         A = torch.from_numpy(A/127.5 - 1).permute(2,0,1).float()
