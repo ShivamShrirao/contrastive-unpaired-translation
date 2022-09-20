@@ -21,7 +21,7 @@ from options.train_options import TrainOptions
 from utils import AverageMeter, reduce_loss, synchronize, cleanup, seed_everything, set_grads, log_imgs_wandb
 from data import CreateDataLoader
 from data.unaligned_dataset import UnAlignedDataset
-from models.custom_unet import NLayerDiscriminator, PatchSampleF, GANLoss, PatchNCELoss, get_norm_layer, DynamicUnet, Unet, ResnetGenerator
+from models.custom_unet import NLayerDiscriminator, PatchSampleF, GANLoss, PatchNCELoss, get_norm_layer, DynamicUnet, Unet, ResnetGenerator, init_weights
 from DiffAugment_pytorch import DiffAugment
 from models.hDCE import PatchHDCELoss
 from models.SRC import SRC_Loss
@@ -30,14 +30,13 @@ from models.SRC import SRC_Loss
 class TrainModel:
     def __init__(self, args):
         self.device = torch.device('cuda', args.local_rank)
-        self.img_size = (128, 512)
+        self.img_size = (256, 512)
         # m = timm.create_model(args.encoder, pretrained=True, exportable=True, features_only=True).to(self.device)
         # self.netG = DynamicUnet(m, args.input_nc, args.output_nc, self_attn=True, spectral=True, norm_lyr=nn.InstanceNorm2d).to(self.device).train()
         # self.netG = Unet(args.input_nc, args.output_nc, args.ngf, self_attn=True).to(self.device)
-        self.netG = ResnetGenerator(args.input_nc, args.output_nc).to(self.device)
+        self.netG = ResnetGenerator(args.input_nc, args.output_nc, args.ngf, get_norm_layer(args.normG)).to(self.device)
         # init_weights(self.netG, args.init_type, args.init_gain)
-        norm_layer = get_norm_layer(args.normD)
-        self.netD = NLayerDiscriminator(args.output_nc, args.ndf, args.n_layers_D, norm_layer).to(self.device)
+        self.netD = NLayerDiscriminator(args.output_nc, args.ndf, args.n_layers_D, get_norm_layer(args.normD)).to(self.device)
         # init_weights(self.netD, args.init_type, args.init_gain)
         with torch.no_grad():
             feats = self.netG(torch.randn(8, args.input_nc, *self.img_size, device=self.device), get_feat=True, encode_only=True)
@@ -139,16 +138,16 @@ class TrainModel:
 
             feat_k = [ft[:batch_size] for ft in feats]
             feat_q = self.netG(fake_B, get_feat=True, encode_only=True)
-            nce_loss_A = self.calculate_NCE_loss(args, feat_k, feat_q)
-            # nce_loss_A, loss_SRC = self.calculate_HDCE_loss(args, feat_k, feat_q)
+            # nce_loss_A = self.calculate_NCE_loss(args, feat_k, feat_q)
+            nce_loss_A, loss_SRC = self.calculate_HDCE_loss(args, feat_k, feat_q)
 
             feat_k = [ft[batch_size:] for ft in feats]
             feat_q = self.netG(idt_B, get_feat=True, encode_only=True)
-            nce_loss_B = self.calculate_NCE_loss(args, feat_k, feat_q)
-            # nce_loss_B, _ = self.calculate_HDCE_loss(args, feat_k, feat_q)
+            # nce_loss_B = self.calculate_NCE_loss(args, feat_k, feat_q)
+            nce_loss_B, _ = self.calculate_HDCE_loss(args, feat_k, feat_q)
 
             nce_loss_tot = (nce_loss_A + nce_loss_B) * 0.5
-            lossG = lossG + nce_loss_tot# + loss_SRC
+            lossG = lossG + nce_loss_tot + loss_SRC
 
         # self.scaler.scale(lossG).backward()
         GF_params = list(self.netG.parameters()) + list(self.netF.parameters())
