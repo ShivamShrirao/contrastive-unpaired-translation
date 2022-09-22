@@ -30,7 +30,7 @@ class UnAlignedDataset(data.Dataset):
         ], additional_targets={'image0': 'image'})
 
         self.aug_transform = A.Compose([
-            A.Affine(scale=(0.9, 1.1), translate_percent=(-0.1, 0.1), rotate=(-5, 5), shear=(-5, 5), p=0.8),
+            A.Affine(scale=(0.9, 1.1), translate_percent=(-0.1, 0.1), rotate=(-3, 3), shear=(-2, 2), p=0.8),
             A.Resize(*self.img_size),
             # A.Normalize(mean=(0.5, 0.5, 0.5), std=(0.5, 0.5, 0.5)),
             # ToTensorV2(),
@@ -72,7 +72,7 @@ class UnAlignedDataset(data.Dataset):
             B_file = self.B_names[random.randint(0, len(self.B_names) - 1)]
         B = cv2.imread(os.path.join(self.dataset_dir, f"{self.phase}_B", B_file), cv2.IMREAD_UNCHANGED)
         A = cv2.cvtColor(A, cv2.COLOR_BGRA2RGBA)
-        B = cv2.cvtColor(B, cv2.COLOR_BGRA2RGB)
+        B = cv2.cvtColor(B, cv2.COLOR_BGRA2RGBA)
 
         aug = self.hflip(image=A, image0=B)
         A = aug['image']
@@ -84,6 +84,7 @@ class UnAlignedDataset(data.Dataset):
                 A = B
             A = self.overlay_refl(A)
         A = A[:,:,:3]
+        B = B[:,:,:3]
         A = torch.from_numpy(A/127.5 - 1).permute(2,0,1).float()
         B = torch.from_numpy(B/127.5 - 1).permute(2,0,1).float()
         return A, B

@@ -138,16 +138,16 @@ class TrainModel:
 
             feat_k = [ft[:batch_size] for ft in feats]
             feat_q = self.netG(fake_B, get_feat=True, encode_only=True)
-            # nce_loss_A = self.calculate_NCE_loss(args, feat_k, feat_q)
-            nce_loss_A, loss_SRC = self.calculate_HDCE_loss(args, feat_k, feat_q)
+            nce_loss_A = self.calculate_NCE_loss(args, feat_k, feat_q)
+            # nce_loss_A, loss_SRC = self.calculate_HDCE_loss(args, feat_k, feat_q)
 
             feat_k = [ft[batch_size:] for ft in feats]
             feat_q = self.netG(idt_B, get_feat=True, encode_only=True)
-            # nce_loss_B = self.calculate_NCE_loss(args, feat_k, feat_q)
-            nce_loss_B, _ = self.calculate_HDCE_loss(args, feat_k, feat_q)
+            nce_loss_B = self.calculate_NCE_loss(args, feat_k, feat_q)
+            # nce_loss_B, _ = self.calculate_HDCE_loss(args, feat_k, feat_q)
 
             nce_loss_tot = (nce_loss_A + nce_loss_B) * 0.5
-            lossG = lossG + nce_loss_tot + loss_SRC
+            lossG = lossG + nce_loss_tot # + loss_SRC
 
         # self.scaler.scale(lossG).backward()
         GF_params = list(self.netG.parameters()) + list(self.netF.parameters())
